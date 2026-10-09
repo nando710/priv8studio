@@ -2,6 +2,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ArrowUpRight, ArrowRight, Plus, Sparkles, Image as ImageIcon, Layers, Library, Clock3, Users, Settings2, ChevronDown, Upload, X, Check, Loader2, ShieldCheck, RefreshCw, Download, LogOut, WandSparkles, SlidersHorizontal, ScanFace, Menu } from "lucide-react";
 import { CATALOGO } from "../lib/source/catalogo";
+import { readApiResponse } from "../lib/http-response";
 
 type Media={id:string;name:string;model:string;category:string;mime:string};
 type Job={id:string;kind:string;title:string;state:string;cost:number;charged:number;remote_id:string;result:string;error:string;created:number};
@@ -11,7 +12,7 @@ const labels:Record<string,string>={SUCCESS:"Concluída",RUNNING:"Processando",Q
 const slots=[{id:"scene",name:"Foto da cena",desc:"O cenário, a roupa e a pose que você quer manter",tag:"01 · CENA"},{id:"front",name:"Sua modelo",desc:"A identidade que vai aparecer na imagem",tag:"02 · IDENTIDADE"}];
 const extras=[{id:"face",name:"Rosto em close"},{id:"back",name:"Costas"},{id:"left",name:"Lado esquerdo"},{id:"right",name:"Lado direito"}];
 const initial={quality:"1080p",head:true,tattoo:false,mask:true,color:false,bust:0,count:1,steps:8,seed:"",view:"none"};
-async function api(path:string,body?:any,method?:string){const response=await fetch(`/api/${path}`,{method:method||(body?"POST":"GET"),headers:body instanceof FormData?{}:body?{"Content-Type":"application/json"}:{},body:body instanceof FormData?body:body?JSON.stringify(body):undefined});const data:any=await response.json();if(!response.ok)throw Object.assign(new Error(data.error||"Não foi possível concluir."),{status:response.status});return data;}
+async function api(path:string,body?:any,method?:string){const response=await fetch(`/api/${path}`,{method:method||(body?"POST":"GET"),headers:body instanceof FormData?{}:body?{"Content-Type":"application/json"}:{},body:body instanceof FormData?body:body?JSON.stringify(body):undefined});return readApiResponse(response);}
 const date=(t:number)=>new Date(t).toLocaleString("pt-BR",{dateStyle:"short",timeStyle:"short"});
 const result=(job:Job)=>{try{return JSON.parse(job.result||"null");}catch{return null;}};
 export default function Studio(){
@@ -33,7 +34,18 @@ export default function Studio(){
  function chooseUpload(slot:string){target.current=slot;uploadRef.current?.click();}
  const cost=data?(data.config.baseCost*options.count*(1+Number(options.head)+Number(options.tattoo)+(options.quality==="4K"?2:options.quality==="2K"?1:0))):0;
  const ready=!!data?.config.runninghub&&!!data?.config.template;
- async function run(kind:string){await action(kind,async()=>{const storageKey=`priv8-request-${data?.account.id}-${kind}`;requestKey.current=sessionStorage.getItem(storageKey)||crypto.randomUUID();sessionStorage.setItem(storageKey,requestKey.current);const r=await api(kind==="generate"?"prompts":"jobs",{requestKey:requestKey.current,files,options,prompt,headPrompt,note});sessionStorage.removeItem(storageKey);requestKey.current=null;if(r.error)throw new Error(r.error);if(kind==="generate"&&r.result){setPrompt(r.result.prompt);setHeadPrompt(r.result.headPrompt||"");setNotes(r.result.notes||"");const view=/<image3>, the (back|left side|right side) view/i.exec(r.result.prompt)?.[1];if(view)setOptions(o=>({...o,view:view==="back"?"back":view==="left side"?"left":"right"}));setToast("Prompt pronto para revisar.");}else {setToast(labels[r.state]||"Solicitação registrada.");if(kind!=="generate")setPage("jobs");}await refresh();});}
+ async function run(kind:string){await action(kind,async()=>{
+  const storageKey=`priv8-request-${data?.account.id}-${kind}`;
+  requestKey.current=sessionStorage.getItem(storageKey)||crypto.randomUUID();sessionStorage.setItem(storageKey,requestKey.current);
+  try {
+   const r=await api(kind==="generate"?"prompts":"jobs",{requestKey:requestKey.current,files,options,prompt,headPrompt,note});
+   sessionStorage.removeItem(storageKey);requestKey.current=null;
+   if(r.error)throw new Error(r.error);
+   if(kind==="generate"&&r.result){setPrompt(r.result.prompt);setHeadPrompt(r.result.headPrompt||"");setNotes(r.result.notes||"");const view=/<image3>, the (back|left side|right side) view/i.exec(r.result.prompt)?.[1];if(view)setOptions(o=>({...o,view:view==="back"?"back":view==="left side"?"left":"right"}));setToast("Prompt pronto para revisar.");}
+   else {setToast(kind==="generate"?"O prompt ainda não está disponível. Confira o estado desta tentativa em Execuções.":labels[r.state]||"Solicitação registrada.");setPage("jobs");}
+  }catch(e){setPage("jobs");throw e;}
+  finally{await refresh().catch(()=>{});}
+ });}
  function importPrompt(j:Job){const r=result(j);if(r?.prompt){setPrompt(r.prompt);setHeadPrompt(r.headPrompt||"");setNotes(r.notes||"");navigate("create");}}
  if(!data)return <main className="welcome"><div className="welcome-grid"/><div className="brand"><span className="brand-symbol">P<span>8</span></span><strong>PRIV8<span>STUDIO</span></strong></div><div className="welcome-content"><span className="eyebrow">SEU PRÓXIMO ESTÚDIO CRIATIVO</span><h1>Sua identidade.<br/><em>Infinitas possibilidades.</em></h1><p>Crie com suas modelos, referências e fluxos.<br/>Todo o processo em um só lugar.</p>{auth==="login"?<a className="primary" href="/signin-with-chatgpt?return_to=%2F" target="_top">Entrar com ChatGPT <ArrowRight size={18}/></a>:auth?<><div className="notice">{auth}</div><button onClick={()=>location.reload()}>Tentar novamente</button><a className="text-link" href="/signout-with-chatgpt?return_to=%2F" target="_top">Trocar conta</a></>:<div className="muted inline"><Loader2 className="spin" size={18}/> Abrindo seu estúdio…</div>}<small>Acesso individual · Acervo privado · Criação por API</small></div><div className="welcome-photo"><img src="/capas/body-swap-28.jpg" alt="Referência visual do catálogo PRIV8 Labs"/><span>PRIV8 LABS / CREATIVE STUDIO</span></div></main>;
  return <div className="studio"><input ref={uploadRef} type="file" hidden accept="image/png,image/jpeg,image/webp" onChange={e=>{if(e.target.files?.[0])uploadFile(e.target.files[0],target.current);e.target.value="";}}/>

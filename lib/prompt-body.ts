@@ -1,0 +1,44 @@
+import { Buffer } from "node:buffer";
+
+export type PromptImage = { label: string; mime: string; open: () => Promise<ReadableStream<Uint8Array>> };
+const encoder = new TextEncoder();
+// Multiples of three preserve base64 alignment between streamed chunks.
+const CHUNK_BYTES = 24 * 1024;
+async function* imageBase64(stream: ReadableStream<Uint8Array>) {
+ const reader = stream.getReader(); let carry = new Uint8Array(0); let complete = false;
+ try {
+  while (true) {
+   const { value, done } = await reader.read(); if (done) { complete = true; break; }
+   for (let offset = 0; offset < value.length; offset += CHUNK_BYTES) {
+    const part = value.subarray(offset, offset + CHUNK_BYTES);
+    const bytes = new Uint8Array(carry.length + part.length); bytes.set(carry); bytes.set(part, carry.length);
+    const end = bytes.length - bytes.length % 3;
+    if (end) yield Buffer.from(bytes.buffer, bytes.byteOffset, end).toString("base64");
+    carry = bytes.slice(end);
+   }
+  }
+  if (carry.length) yield Buffer.from(carry).toString("base64");
+ } finally { if (!complete) await reader.cancel().catch(() => {}); reader.releaseLock(); }
+}
+
+export function promptBody(model: string, instructions: string, note: string, images: PromptImage[]) {
+ async function* chunks() {
+  const settings = JSON.stringify({ model, instructions, store: false, max_output_tokens: 8000 });
+  yield settings.slice(0,-1) + ',"input":[{"role":"user","content":[';
+  let first = true;
+  for (const image of images) {
+   if (!/^image\/(png|jpeg|webp)$/.test(image.mime)) throw new Error("Unsupported image type");
+   if (!first) yield ','; first = false;
+   yield JSON.stringify({type:"input_text",text:image.label}) + ',{"type":"input_image","detail":"high","image_url":"data:' + image.mime + ';base64,';
+   yield* imageBase64(await image.open());
+   yield '"}';
+  }
+  if (!first) yield ',';
+  yield JSON.stringify({type:"input_text",text:note}) + ']}]}';
+ }
+ const iterator = chunks();
+ return new ReadableStream<Uint8Array>({
+  async pull(controller) { try { const next = await iterator.next(); if(next.done)controller.close();else controller.enqueue(encoder.encode(next.value)); } catch(e) {controller.error(e);} },
+  async cancel() { await iterator.return(undefined); }
+ }, {highWaterMark:0});
+}

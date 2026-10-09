@@ -3,6 +3,7 @@ import { getChatGPTUser } from "../app/chatgpt-auth";
 import { AppError, ACTIVE, month, integer, cleanOptions, price, parseOutput, taskId, RESERVE_SQL, WORKFLOW_ID } from "./core";
 import { buildGraph, validateGraph } from "./workflow";
 import moldes from "./source/moldes.json";
+import { promptBody, type PromptImage } from "./prompt-body";
 type Account={id:string;user_id:string;email:string;name:string;role:string;active:number;budget:number;concurrent:number};
 const db=()=>{if(!env.DB)throw new AppError(503,"Banco de dados indisponível.");return env.DB;};
 const bucket=()=>{if(!env.BUCKET)throw new AppError(503,"Acervo indisponível.");return env.BUCKET;};
@@ -65,13 +66,13 @@ async function submit(a:Account,b:any){
 async function generate(a:Account,b:any){
  const c=await configuration();if(!c.prompts)throw new AppError(409,"Conecte o gerador de prompts em Configurações.");
  const files=b.files||{};if(!files.scene||!files.front)throw new AppError(400,"Selecione a cena e a modelo.");
- const content:any[]=[],labels:Record<string,string>={scene:"<image1>: base scene, preserve outfit and pose",front:"<image2>: adult model, front view",back:"Extra reference: back view",left:"Extra reference: left side",right:"Extra reference: right side"};
- for(const [k,label]of Object.entries(labels))if(files[k]){const {row,obj}=await object(a,files[k]);content.push({type:"input_text",text:label},{type:"input_image",image_url:`data:${row.mime};base64,${b64(new Uint8Array(await obj.arrayBuffer()))}`,detail:"high"});}
+ const images:PromptImage[]=[],labels:Record<string,string>={scene:"<image1>: base scene, preserve outfit and pose",front:"<image2>: adult model, front view",back:"Extra reference: back view",left:"Extra reference: left side",right:"Extra reference: right side"};
+ for(const [k,label]of Object.entries(labels))if(files[k]){const row=await ownMedia(a,files[k]);images.push({label,mime:row.mime,open:async()=>{const obj=await bucket().get(row.object_key);if(!obj)throw new AppError(404,"Arquivo indisponível.");return obj.body;}});}
  const m:any=moldes;let instructions=m.PROMPT_SISTEMA||"";if(!instructions)throw new AppError(503,"Molde indisponível.");if(files.back||files.left||files.right)instructions+="\n\n"+(m.SWAP_VISTAS||"");if(b.options?.head!==false)instructions+="\n\n"+(m.SWAP_CABECA||"");
- content.push({type:"input_text",text:`Operator request: ${String(b.note||"").slice(0,4000)}\nWrite the required <prompt> and <notas> blocks. Describe only the supplied images.`});
+ const note=`Operator request: ${String(b.note||"").slice(0,4000)}\nWrite the required <prompt> and <notas> blocks. Describe only the supplied images.`;
  const {job,fresh}=await reserve(a,b,"prompt",c.promptCost,"Prompt · Body swap");if(!fresh)return {id:job.id,state:job.state,result:job.result?JSON.parse(job.result):null};let sent=false;
  try{
-  const key=await secret("openai_key");await update(job.id,"submitting");sent=true;const res=await fetch("https://api.openai.com/v1/responses",{method:"POST",headers:{Authorization:`Bearer ${key}`,"Content-Type":"application/json"},body:JSON.stringify({model:c.model,instructions,input:[{role:"user",content}],store:false,max_output_tokens:8000}),signal:AbortSignal.timeout(110000)});
+  const key=await secret("openai_key");await update(job.id,"submitting");sent=true;const res=await fetch("https://api.openai.com/v1/responses",{method:"POST",headers:{Authorization:`Bearer ${key}`,"Content-Type":"application/json"},body:promptBody(c.model,instructions,note,images),signal:AbortSignal.timeout(110000)});
   if(!res.ok){await update(job.id,"rejected",{error:`Gerador respondeu HTTP ${res.status}.`,refund:true});return {id:job.id,state:"rejected",error:`Gerador respondeu HTTP ${res.status}.`};}
   const r:any=await res.json();const text=(r.output||[]).filter((x:any)=>x.type==="message").flatMap((x:any)=>x.content||[]).filter((x:any)=>x.type==="output_text").map((x:any)=>x.text).join("\n");
   const raw=/<prompt>([\s\S]*?)<\/prompt>/.exec(text)?.[1]?.trim();if(r.status!=="completed"||!raw)throw new AppError(502,"O gerador não devolveu um prompt completo. Confira o histórico antes de tentar novamente.");
