@@ -23,7 +23,7 @@ O site foi preparado para acesso exclusivo do proprietário. As contas/senhas do
 - Proteção contra envio duplicado e retenção de créditos em respostas incertas, com conciliação administrativa.
 - Catálogo original como navegação: **somente o 28C está implementado para execução**. As outras ferramentas indicam “Integração em preparação”.
 
-Os créditos são uma regra interna configurável, não o saldo nem o preço real do RunningHub. A consulta de andamento acontece enquanto o painel está aberto e ao retornar. Resultados são links do provedor, cuja retenção não é garantida por este aplicativo. Acervo limitado a 500 MB por usuário, com imagens de até 15 MB (8 MB por referência no gerador de prompts).
+Os créditos são uma regra interna configurável, não o saldo nem o preço real do RunningHub. A consulta de andamento acontece enquanto o painel está aberto e ao retornar. Resultados são links do provedor, cuja retenção não é garantida por este aplicativo. Acervo limitado a 500 MB por usuário, com imagens de até 15 MB. O gerador de prompts aceita as imagens do acervo sem um limite adicional de 8 MB por referência.
 
 Em envios sem resposta conclusiva, confira a cobrança e a tarefa no provedor antes de estornar. Não há repetição automática de tarefas incertas. Uma interrupção durante o envio pode precisar de conciliação. O aplicativo não inclui cobrança financeira, planos pagos, recuperação de senhas próprias ou uma fila de processamento independente.
 
