@@ -41,7 +41,7 @@ function encryptionKeyToCreate() {
   if (result.status === 0) {
     const names = JSON.parse(result.stdout.slice(result.stdout.indexOf("["))).map((secret) => secret.name);
     if (names.includes("CREDENTIAL_ENCRYPTION_KEY")) return "";
-  } else if (!/10007|does not exist/i.test(output)) {
+  } else if (!/10007|does not exist|not found/i.test(output)) {
     console.error(output);
     console.error("✖ Não foi possível conferir os segredos do Worker.");
     process.exit(1);
