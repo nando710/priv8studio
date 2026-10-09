@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 import { currentUser, mayBootstrap, adminEmails, authMode } from "./auth";
 import { AppError, ACTIVE, month, integer, cleanOptions, price, parseOutput, taskId, RESERVE_SQL, WORKFLOW_ID, RECOVER_PROMPTS_SQL, PROMPT_RECOVERY_MS, PROMPT_TIMEOUT_MS, PROMPT_HEARTBEAT_MS } from "./core";
 import { buildGraph, validateGraph } from "./workflow";
-import moldes from "./source/moldes.json";
+import { AGENTS, MAX_AGENT_PROMPT, agentSettingKey, defaultAgentPrompt, findAgent, type AgentId } from "./agents";
 import { promptBody, PROMPT_IMAGE_BYTES, type PromptImage } from "./prompt-body";
 import { eventStream, parsePrompt, readPromptStream } from "./prompt-stream";
 import { parseAdjustments, refineNote } from "./refine";
@@ -78,9 +78,11 @@ async function promptImages(a:Account,files:any){
  return {images,bytes,views};
 }
 const tooLarge=(bytes:number)=>new AppError(413,`As fotos somam ${(bytes/1e6).toFixed(1)} MB e o gerador aceita até ${PROMPT_IMAGE_BYTES/1e6} MB por vez. Use fotos menores ou menos vistas extras.`);
-function systemPrompt(views:string[],head:boolean){
- const m:any=moldes;let instructions=m.PROMPT_SISTEMA||"";if(!instructions)throw new AppError(503,"Molde indisponível.");
- if(views.length)instructions+="\n\n"+(m.SWAP_VISTAS||"");if(head)instructions+="\n\n"+(m.SWAP_CABECA||"");return instructions;
+// The administrator's saved text wins; otherwise the extension's template.
+async function agentPrompt(id:AgentId){return (await setting(agentSettingKey(id)))||defaultAgentPrompt(id);}
+async function systemPrompt(views:string[],head:boolean){
+ let instructions=await agentPrompt("PROMPT_SISTEMA");if(!instructions.trim())throw new AppError(503,"Agente do Body swap sem instruções.");
+ if(views.length)instructions+="\n\n"+await agentPrompt("SWAP_VISTAS");if(head)instructions+="\n\n"+await agentPrompt("SWAP_CABECA");return instructions;
 }
 // Streams one reserved prompt job to the browser: progress events, then the final result.
 function streamPromptJob(job:any,model:string,instructions:string,note:string,images:PromptImage[],parse:(text:string)=>any){
@@ -110,7 +112,7 @@ function streamPromptJob(job:any,model:string,instructions:string,note:string,im
 async function generate(a:Account,b:any){
  const c=await configuration();if(!c.prompts)throw new AppError(409,"Conecte o gerador de prompts em Configurações.");
  const {images,bytes,views}=await promptImages(a,b.files);if(bytes>PROMPT_IMAGE_BYTES)throw tooLarge(bytes);
- const instructions=systemPrompt(views,b.options?.head!==false);
+ const instructions=await systemPrompt(views,b.options?.head!==false);
  const note=`${views.length?`Extra views sent: ${views.join(", ")}.\n`:""}Operator request: ${String(b.note||"").slice(0,4000)}\nWrite the required <prompt> and <notas> blocks. Describe only the supplied images.`;
  const {job,fresh}=await reserve(a,b,"prompt",c.promptCost,"Prompt · Body swap");if(!fresh)return {id:job.id,state:job.state,result:job.result?JSON.parse(job.result):null,error:job.error||undefined};
  return streamPromptJob(job,c.model,instructions,note,images,parsePrompt);
@@ -134,7 +136,7 @@ async function refine(a:Account,b:any){
  if(!/^image\/(png|jpeg|webp)$/.test(mime)){drop();throw new AppError(415,"O formato da imagem gerada não é aceito pelo gerador.");}
  if(bytes+size>PROMPT_IMAGE_BYTES){drop();throw tooLarge(bytes+size);}
  const body=res.body;images.unshift({label:"<result1>: the result image produced by the current blocks (for your analysis only)",mime,open:async()=>body});
- const m:any=moldes;const instructions=systemPrompt(views,options.head)+"\n\n"+(m.REFINO_REGRAS||"");
+ const instructions=await systemPrompt(views,options.head)+"\n\n"+await agentPrompt("REFINO_REGRAS");
  const note=refineNote({prompt,headPrompt:String(b.headPrompt||"").slice(0,20000),instructions:request,views,options});
  const {job,fresh}=await reserve(a,{...b,options},"prompt",c.promptCost,"Prompt · Refino");
  if(!fresh){drop();return {id:job.id,state:job.state,result:job.result?JSON.parse(job.result):null,error:job.error||undefined};}
@@ -155,7 +157,7 @@ export async function route(req:Request,path:string[]){
  if(req.method==="GET"&&key==="init"){
   await recoverPrompts();
   const usage=await db().prepare("SELECT COALESCE(SUM(cost),0) AS used FROM jobs WHERE owner=? AND period=? AND charged=1").bind(a.id,month()).first<any>();
-  return {account:a,auth:authMode(),used:usage?.used||0,config:await configuration(),jobs:(await db().prepare("SELECT id,kind,title,state,cost,charged,remote_id,result,error,created,updated FROM jobs WHERE owner=? ORDER BY created DESC LIMIT 100").bind(a.id).all()).results,media:(await db().prepare("SELECT id,name,mime,bytes,model,category,created FROM media WHERE owner=? ORDER BY created DESC LIMIT 500").bind(a.id).all()).results};
+  return {account:a,auth:authMode(),used:usage?.used||0,config:await configuration(),jobs:(await db().prepare("SELECT id,kind,title,state,cost,charged,remote_id,result,error,created,updated,CASE WHEN json_valid(payload) THEN json_extract(payload,'$.files.scene') END AS scene FROM jobs WHERE owner=? ORDER BY created DESC LIMIT 100").bind(a.id).all()).results,media:(await db().prepare("SELECT id,name,mime,bytes,model,category,created FROM media WHERE owner=? ORDER BY created DESC LIMIT 500").bind(a.id).all()).results};
  }
  if(key==="media"&&req.method==="POST"){
   if(Number(req.headers.get("content-length")||0)>16_000_000)throw new AppError(413,"Limite de 15 MB por imagem.");const f=await req.formData(),file=f.get("file");
@@ -187,6 +189,19 @@ export async function route(req:Request,path:string[]){
    if(b.model){if(!/^[a-zA-Z0-9._-]{1,100}$/.test(b.model))throw new AppError(400,"Modelo inválido.");await putSetting("prompt_model",b.model);}
    for(const [field,name,min,max]of [["baseCost","base_cost",1,10000],["promptCost","prompt_cost",1,1000],["globalLimit","global_limit",1,20]] as const)if(b[field]!=null)await putSetting(name,String(integer(b[field],min,max)));
    await audit(a.id,"integration_updated","configuration");return {ok:true,config:await configuration()};
+  }
+  if(key==="admin/agents"&&req.method==="GET"){
+   const rows=(await db().prepare("SELECT key,value FROM settings WHERE key LIKE 'agent_prompt:%'").all<any>()).results,saved=new Map(rows.map((r:any)=>[r.key,r.value]));
+   return {agents:AGENTS.map(g=>{const custom=saved.get(agentSettingKey(g.id));return {...g,prompt:custom||defaultAgentPrompt(g.id),custom:!!custom,defaultLength:defaultAgentPrompt(g.id).length};})};
+  }
+  if(key==="admin/agents"&&req.method==="POST"){
+   const b=await json(req,MAX_AGENT_PROMPT*4),agent=findAgent(b.id);if(!agent)throw new AppError(404,"Agente inexistente.");
+   if(b.reset===true){await db().prepare("DELETE FROM settings WHERE key=?").bind(agentSettingKey(agent.id)).run();await audit(a.id,"agent_prompt_reset",agent.id);return {ok:true,prompt:defaultAgentPrompt(agent.id),custom:false};}
+   const prompt=String(b.prompt??"").replace(/\r\n/g,"\n");if(!prompt.trim())throw new AppError(400,"O system prompt não pode ficar vazio. Use “Restaurar padrão” para voltar ao original.");
+   if(prompt.length>MAX_AGENT_PROMPT)throw new AppError(413,`Use até ${MAX_AGENT_PROMPT.toLocaleString("pt-BR")} caracteres.`);
+   // Saving the default text keeps following future template updates instead of freezing a copy.
+   if(prompt===defaultAgentPrompt(agent.id))await db().prepare("DELETE FROM settings WHERE key=?").bind(agentSettingKey(agent.id)).run();else await putSetting(agentSettingKey(agent.id),prompt);
+   await audit(a.id,"agent_prompt_updated",agent.id);return {ok:true,prompt,custom:prompt!==defaultAgentPrompt(agent.id)};
   }
   if(key==="admin/reconcile"&&req.method==="POST"){
    const b=await json(req),job=await db().prepare("SELECT * FROM jobs WHERE id=?").bind(b.id).first<any>();if(!job)throw new AppError(404,"Tarefa inexistente.");
