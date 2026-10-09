@@ -3,7 +3,7 @@ export async function readApiResponse(response: Response) {
  try { data = JSON.parse(text); } catch {
   throw new Error(response.ok ? "O servidor devolveu uma resposta inválida. Confira Execuções antes de tentar novamente." : `O servidor interrompeu a solicitação (HTTP ${response.status}). Confira Execuções antes de tentar novamente.`);
  }
- if (!response.ok) throw Object.assign(new Error(data.error || "Não foi possível concluir."), {status:response.status});
+ if (!response.ok) throw Object.assign(new Error(data.error || "Não foi possível concluir."), {status:response.status, auth:data.auth});
  return data;
 }
 // Reads newline-delimited JSON events; returns the final "done" event and reports the others as they arrive.

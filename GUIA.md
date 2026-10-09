@@ -2,6 +2,8 @@
 
 Primeira versão da plataforma web para o workflow RunningHub **28C Body swap**, ID `2108613051860013058`. Interface em português, login individual com ChatGPT, acervo privado por conta, histórico e limites mensais de créditos internos. A chave do proprietário atende todos os membros pelo servidor.
 
+Para publicar na sua própria conta da Cloudflare, com login pelo Cloudflare Access, siga o [DEPLOY.md](DEPLOY.md). As etapas abaixo descrevem a configuração no Sites.
+
 ## Ativação inicial
 
 1. Abra o endereço privado do site e entre com sua conta ChatGPT. O primeiro acesso autenticado, enquanto o site é exclusivo do proprietário, inicializa o administrador.

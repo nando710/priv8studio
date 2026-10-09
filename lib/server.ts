@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { getChatGPTUser } from "../app/chatgpt-auth";
+import { currentUser, mayBootstrap, authMode } from "./auth";
 import { AppError, ACTIVE, month, integer, cleanOptions, price, parseOutput, taskId, RESERVE_SQL, WORKFLOW_ID, RECOVER_PROMPTS_SQL, PROMPT_RECOVERY_MS, PROMPT_TIMEOUT_MS, PROMPT_HEARTBEAT_MS } from "./core";
 import { buildGraph, validateGraph } from "./workflow";
 import moldes from "./source/moldes.json";
@@ -18,10 +18,10 @@ async function encryptionKey(){if(!env.CREDENTIAL_ENCRYPTION_KEY)throw new AppEr
 async function encrypt(s:string){const iv=crypto.getRandomValues(new Uint8Array(12));const result=await crypto.subtle.encrypt({name:"AES-GCM",iv},await encryptionKey(),new TextEncoder().encode(s));return b64(iv)+"."+b64(new Uint8Array(result));}
 async function secret(name:string){const s=await setting(name);if(!s)throw new AppError(503,"Integração ainda não configurada pelo administrador.");const [iv,cipher]=s.split(".");return new TextDecoder().decode(await crypto.subtle.decrypt({name:"AES-GCM",iv:unb64(iv)},await encryptionKey(),unb64(cipher)));}
 export async function account():Promise<Account>{
- const u=await getChatGPTUser();if(!u)throw new AppError(401,"Entre para acessar o estúdio.");
+ const u=await currentUser();if(!u)throw new AppError(401,"Entre para acessar o estúdio.");
  let a=await db().prepare("SELECT * FROM accounts WHERE user_id=?").bind(u.userId).first<Account>();
  if(!a){
-  if(env.ALLOW_PRIVATE_BOOTSTRAP==="true")await db().prepare("INSERT INTO accounts(id,user_id,email,name,role,active,budget,concurrent,created) SELECT ?,?,?,?,'admin',1,1000,2,? WHERE NOT EXISTS(SELECT 1 FROM accounts) AND NOT EXISTS(SELECT 1 FROM settings WHERE key='bootstrap_closed')").bind(uuid(),u.userId,u.email.toLowerCase(),u.displayName,now()).run();
+  if(mayBootstrap(u.email))await db().prepare("INSERT INTO accounts(id,user_id,email,name,role,active,budget,concurrent,created) SELECT ?,?,?,?,'admin',1,1000,2,? WHERE NOT EXISTS(SELECT 1 FROM accounts) AND NOT EXISTS(SELECT 1 FROM settings WHERE key='bootstrap_closed')").bind(uuid(),u.userId,u.email.toLowerCase(),u.displayName,now()).run();
   a=await db().prepare("SELECT * FROM accounts WHERE user_id=?").bind(u.userId).first<Account>();
   if(a)await putSetting("bootstrap_closed","true");
   else{await db().prepare("UPDATE accounts SET user_id=? WHERE email=? AND user_id IS NULL AND active=1").bind(u.userId,u.email.toLowerCase()).run();a=await db().prepare("SELECT * FROM accounts WHERE user_id=?").bind(u.userId).first<Account>();}
@@ -106,7 +106,7 @@ export async function route(req:Request,path:string[]){
  if(req.method==="GET"&&key==="init"){
   await recoverPrompts();
   const usage=await db().prepare("SELECT COALESCE(SUM(cost),0) AS used FROM jobs WHERE owner=? AND period=? AND charged=1").bind(a.id,month()).first<any>();
-  return {account:a,used:usage?.used||0,config:await configuration(),jobs:(await db().prepare("SELECT id,kind,title,state,cost,charged,remote_id,result,error,created,updated FROM jobs WHERE owner=? ORDER BY created DESC LIMIT 100").bind(a.id).all()).results,media:(await db().prepare("SELECT id,name,mime,bytes,model,category,created FROM media WHERE owner=? ORDER BY created DESC LIMIT 500").bind(a.id).all()).results};
+  return {account:a,auth:authMode(),used:usage?.used||0,config:await configuration(),jobs:(await db().prepare("SELECT id,kind,title,state,cost,charged,remote_id,result,error,created,updated FROM jobs WHERE owner=? ORDER BY created DESC LIMIT 100").bind(a.id).all()).results,media:(await db().prepare("SELECT id,name,mime,bytes,model,category,created FROM media WHERE owner=? ORDER BY created DESC LIMIT 500").bind(a.id).all()).results};
  }
  if(key==="media"&&req.method==="POST"){
   if(Number(req.headers.get("content-length")||0)>16_000_000)throw new AppError(413,"Limite de 15 MB por imagem.");const f=await req.formData(),file=f.get("file");
