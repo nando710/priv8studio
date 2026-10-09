@@ -4,6 +4,9 @@ export type PromptImage = { label: string; mime: string; open: () => Promise<Rea
 const encoder = new TextEncoder();
 // Multiples of three preserve base64 alignment between streamed chunks.
 const CHUNK_BYTES = 24 * 1024;
+export const MAX_OUTPUT_TOKENS = 32000;
+// The API caps the whole request near 50 MB; base64 adds a third, so raw images must stay below this.
+export const PROMPT_IMAGE_BYTES = 36_000_000;
 async function* imageBase64(stream: ReadableStream<Uint8Array>) {
  const reader = stream.getReader(); let carry = new Uint8Array(0); let complete = false;
  try {
@@ -23,7 +26,9 @@ async function* imageBase64(stream: ReadableStream<Uint8Array>) {
 
 export function promptBody(model: string, instructions: string, note: string, images: PromptImage[]) {
  async function* chunks() {
-  const settings = JSON.stringify({ model, instructions, store: false, max_output_tokens: 8000 });
+  // Streaming keeps the connection active while the model reasons. Reasoning tokens count toward
+  // max_output_tokens, so the budget must cover reasoning plus the long 13/14-paragraph prompt.
+  const settings = JSON.stringify({ model, instructions, store: false, stream: true, max_output_tokens: MAX_OUTPUT_TOKENS });
   yield settings.slice(0,-1) + ',"input":[{"role":"user","content":[';
   let first = true;
   for (const image of images) {

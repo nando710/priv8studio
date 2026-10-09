@@ -2,8 +2,12 @@ export class AppError extends Error { constructor(public status: number, message
 export const check = (condition: unknown, message: string, status = 400): asserts condition => { if (!condition) throw new AppError(status, message); };
 export const WORKFLOW_ID = "2108613051860013058";
 export const ACTIVE = ["preparing", "submitting", "unknown", "QUEUED", "RUNNING"];
-export const PROMPT_RECOVERY_MS = 5 * 60 * 1000;
-// Prompts use a bounded synchronous request; a crashed request must not hold a slot forever.
+// Prompts stream from the model for at most PROMPT_TIMEOUT_MS. A running attempt refreshes `updated`
+// every PROMPT_HEARTBEAT_MS, so only an attempt that stopped refreshing is recovered.
+export const PROMPT_TIMEOUT_MS = 9 * 60 * 1000;
+export const PROMPT_HEARTBEAT_MS = 30 * 1000;
+export const PROMPT_RECOVERY_MS = 2 * 60 * 1000;
+// A crashed or disconnected prompt request must not hold a slot forever.
 // Preserve both the charge and request key: recovery does not retry or imply a provider refund.
 export const RECOVER_PROMPTS_SQL = `UPDATE jobs SET state='interrupted',updated=?,error=?
  WHERE kind='prompt' AND state IN ('preparing','submitting','unknown') AND updated<?`;
