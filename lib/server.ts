@@ -151,13 +151,26 @@ async function jobDetails(a:Account,id:string){
  if(ids.length)for(const row of (await db().prepare(`SELECT id FROM media WHERE owner=? AND id IN (${ids.map(()=>"?").join(",")})`).bind(a.id,...ids).all<any>()).results)present.add(row.id);
  return {id:job.id,kind:job.kind,state:job.state,created:job.created,files,missing:Object.keys(files).filter(k=>!present.has(files[k])),options:p.options||{},prompt:String(p.prompt||""),headPrompt:String(p.headPrompt||""),note:String(p.note||"")};
 }
+// Saved models: one row per model with her reference photos by view.
+const MODEL_VIEWS=["front","back","left","right","face"] as const;
+// "left" and "right" are SQL keywords, so their aliases are quoted.
+const MODEL_SELECT=`SELECT id,name,front_id AS front,back_id AS back,left_id AS "left",right_id AS "right",face_id AS face,updated FROM models`;
+async function saveModel(a:Account,b:any){
+ const name=String(b.name||"").trim().slice(0,80);if(!name)throw new AppError(400,"Dê um nome para a modelo.");
+ const files:Record<string,string|null>={};
+ for(const v of MODEL_VIEWS){const id=b.files?.[v];files[v]=id?String(id):null;if(files[v])await ownMedia(a,files[v]!);}
+ if(!files.front)throw new AppError(400,"Adicione a foto de frente da modelo.");
+ const t=now(),values=[name,files.front,files.back,files.left,files.right,files.face,t];
+ if(b.id){const r=await db().prepare("UPDATE models SET name=?,front_id=?,back_id=?,left_id=?,right_id=?,face_id=?,updated=? WHERE id=? AND owner=?").bind(...values,String(b.id),a.id).run();if(!r.meta.changes)throw new AppError(404,"Modelo não encontrada.");return {id:String(b.id)};}
+ const id=uuid();await db().prepare("INSERT INTO models(name,front_id,back_id,left_id,right_id,face_id,updated,id,owner,created) VALUES(?,?,?,?,?,?,?,?,?,?)").bind(...values,id,a.id,t).run();return {id};
+}
 export async function route(req:Request,path:string[]){
  if(req.method!=="GET"&&req.headers.get("origin")!==new URL(req.url).origin)throw new AppError(403,"Origem inválida.");
  const a=await account(),key=path.join("/");
  if(req.method==="GET"&&key==="init"){
   await recoverPrompts();
   const usage=await db().prepare("SELECT COALESCE(SUM(cost),0) AS used FROM jobs WHERE owner=? AND period=? AND charged=1").bind(a.id,month()).first<any>();
-  return {account:a,auth:authMode(),used:usage?.used||0,config:await configuration(),jobs:(await db().prepare("SELECT id,kind,title,state,cost,charged,remote_id,result,error,created,updated,CASE WHEN json_valid(payload) THEN json_extract(payload,'$.files.scene') END AS scene FROM jobs WHERE owner=? ORDER BY created DESC LIMIT 100").bind(a.id).all()).results,media:(await db().prepare("SELECT id,name,mime,bytes,model,category,created FROM media WHERE owner=? ORDER BY created DESC LIMIT 500").bind(a.id).all()).results};
+  return {account:a,auth:authMode(),used:usage?.used||0,config:await configuration(),jobs:(await db().prepare("SELECT id,kind,title,state,cost,charged,remote_id,result,error,created,updated,CASE WHEN json_valid(payload) THEN json_extract(payload,'$.files.scene') END AS scene FROM jobs WHERE owner=? ORDER BY created DESC LIMIT 100").bind(a.id).all()).results,media:(await db().prepare("SELECT id,name,mime,bytes,model,category,created FROM media WHERE owner=? ORDER BY created DESC LIMIT 500").bind(a.id).all()).results,models:(await db().prepare(`${MODEL_SELECT} WHERE owner=? ORDER BY updated DESC LIMIT 200`).bind(a.id).all()).results};
  }
  if(key==="media"&&req.method==="POST"){
   if(Number(req.headers.get("content-length")||0)>16_000_000)throw new AppError(413,"Limite de 15 MB por imagem.");const f=await req.formData(),file=f.get("file");
@@ -168,6 +181,8 @@ export async function route(req:Request,path:string[]){
  }
  if(path[0]==="media"&&path[1]&&req.method==="GET"){const {row,obj}=await object(a,path[1]);return new Response(obj.body,{headers:{"Content-Type":row.mime,"Cache-Control":"private, no-store","X-Content-Type-Options":"nosniff"}});}
  if(path[0]==="media"&&path[1]&&req.method==="DELETE"){const row=await ownMedia(a,path[1]);await bucket().delete(row.object_key);await db().prepare("DELETE FROM media WHERE id=? AND owner=?").bind(row.id,a.id).run();return {ok:true};}
+ if(key==="models"&&req.method==="POST")return saveModel(a,await json(req));
+ if(path[0]==="models"&&path[1]&&req.method==="DELETE"){await db().prepare("DELETE FROM models WHERE id=? AND owner=?").bind(path[1],a.id).run();return {ok:true};}
  if(key==="jobs"&&req.method==="POST")return submit(a,await json(req));
  if(key==="prompts"&&req.method==="POST")return generate(a,await json(req));
  if(key==="prompts/refine"&&req.method==="POST")return refine(a,await json(req));

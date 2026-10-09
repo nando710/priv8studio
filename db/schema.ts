@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { sqliteTable, text, integer, uniqueIndex, index } from "drizzle-orm/sqlite-core";
 
 export const accounts = sqliteTable("accounts", {
   id: text("id").primaryKey(), userId: text("user_id").unique(), email: text("email").notNull().unique(),
@@ -21,3 +21,9 @@ export const media = sqliteTable("media", {
 });
 export const settings = sqliteTable("settings", { key: text("key").primaryKey(), value: text("value").notNull() });
 export const audit = sqliteTable("audit", { id: text("id").primaryKey(), actor: text("actor").notNull(), action: text("action").notNull(), target: text("target").notNull(), created: integer("created").notNull() });
+// A saved model: her reference photos by view, so a creation can select them all at once.
+export const models = sqliteTable("models", {
+  id: text("id").primaryKey(), owner: text("owner").notNull().references(() => accounts.id), name: text("name").notNull(),
+  frontId: text("front_id"), backId: text("back_id"), leftId: text("left_id"), rightId: text("right_id"), faceId: text("face_id"),
+  created: integer("created").notNull(), updated: integer("updated").notNull(),
+}, (t) => [index("models_owner").on(t.owner)]);
