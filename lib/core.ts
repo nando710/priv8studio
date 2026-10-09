@@ -2,6 +2,11 @@ export class AppError extends Error { constructor(public status: number, message
 export const check = (condition: unknown, message: string, status = 400): asserts condition => { if (!condition) throw new AppError(status, message); };
 export const WORKFLOW_ID = "2108613051860013058";
 export const ACTIVE = ["preparing", "submitting", "unknown", "QUEUED", "RUNNING"];
+export const PROMPT_RECOVERY_MS = 5 * 60 * 1000;
+// Prompts use a bounded synchronous request; a crashed request must not hold a slot forever.
+// Preserve both the charge and request key: recovery does not retry or imply a provider refund.
+export const RECOVER_PROMPTS_SQL = `UPDATE jobs SET state='interrupted',updated=?,error=?
+ WHERE kind='prompt' AND state IN ('preparing','submitting','unknown') AND updated<?`;
 export function taskId(value: unknown): string | null {
   if (typeof value === "number" && !Number.isSafeInteger(value)) return null;
   if (typeof value !== "string" && typeof value !== "number") return null;

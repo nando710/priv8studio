@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { getChatGPTUser } from "../app/chatgpt-auth";
-import { AppError, ACTIVE, month, integer, cleanOptions, price, parseOutput, taskId, RESERVE_SQL, WORKFLOW_ID } from "./core";
+import { AppError, ACTIVE, month, integer, cleanOptions, price, parseOutput, taskId, RESERVE_SQL, WORKFLOW_ID, RECOVER_PROMPTS_SQL, PROMPT_RECOVERY_MS } from "./core";
 import { buildGraph, validateGraph } from "./workflow";
 import moldes from "./source/moldes.json";
 import { promptBody, type PromptImage } from "./prompt-body";
@@ -39,12 +39,14 @@ async function configuration(){return {runninghub:!!await setting("runninghub_ke
 async function ownMedia(a:Account,id:string){const row=await db().prepare("SELECT * FROM media WHERE id=? AND owner=?").bind(id,a.id).first<any>();if(!row)throw new AppError(404,"Arquivo não encontrado no seu acervo.");return row;}
 async function object(a:Account,id:string){const row=await ownMedia(a,id);const obj=await bucket().get(row.object_key);if(!obj)throw new AppError(404,"Arquivo indisponível.");return {row,obj};}
 async function reserve(a:Account,b:any,kind:string,cost:number,title:string){
+ await recoverPrompts();
  if(typeof b.requestKey!=="string"||!/^[a-zA-Z0-9-]{16,80}$/.test(b.requestKey))throw new AppError(400,"Identificador de solicitação inválido.");
  const id=uuid(),t=now(),period=month();const result=await db().prepare(RESERVE_SQL).bind(id,b.requestKey,kind,title,cost,period,JSON.stringify(b),t,t,a.id,cost,period,integer(await setting("global_limit","2"),1,20)).run();
  const job=await db().prepare("SELECT * FROM jobs WHERE owner=? AND request_key=?").bind(a.id,b.requestKey).first<any>();
  if(!job)throw new AppError(429,"Limite de créditos ou de execuções simultâneas atingido.");return {job,fresh:result.meta.changes===1};
 }
 async function update(id:string,state:string,o:{error?:string;remote?:string;result?:any;refund?:boolean}={}){await db().prepare("UPDATE jobs SET state=?,updated=?,error=?,remote_id=COALESCE(?,remote_id),result=COALESCE(?,result),charged=CASE WHEN ?=1 THEN 0 ELSE charged END WHERE id=?").bind(state,now(),o.error||null,o.remote||null,o.result?JSON.stringify(o.result):null,o.refund?1:0,id).run();}
+async function recoverPrompts(){const t=now();await db().prepare(RECOVER_PROMPTS_SQL).bind(t,"Esta tentativa foi interrompida e já não ocupa uma vaga. Você pode iniciar uma nova geração. O crédito permanece reservado até conferência da cobrança pelo administrador.",t-PROMPT_RECOVERY_MS).run();}
 async function upload(a:Account,id:string){const {row,obj}=await object(a,id);const form=new FormData();form.set("fileType","input");form.set("file",new Blob([await obj.arrayBuffer()],{type:row.mime}),row.name);const r=await rh("/task/openapi/upload",null,form);if(r.code!==0||typeof r.data?.fileName!=="string")throw new AppError(502,`Upload recusado (código ${r.code??"desconhecido"}).`);return r.data.fileName;}
 async function submit(a:Account,b:any){
  const c=await configuration();if(!c.runninghub||!c.template)throw new AppError(409,"Configure a chave e importe o workflow em formato API.");
@@ -70,7 +72,7 @@ async function generate(a:Account,b:any){
  for(const [k,label]of Object.entries(labels))if(files[k]){const row=await ownMedia(a,files[k]);images.push({label,mime:row.mime,open:async()=>{const obj=await bucket().get(row.object_key);if(!obj)throw new AppError(404,"Arquivo indisponível.");return obj.body;}});}
  const m:any=moldes;let instructions=m.PROMPT_SISTEMA||"";if(!instructions)throw new AppError(503,"Molde indisponível.");if(files.back||files.left||files.right)instructions+="\n\n"+(m.SWAP_VISTAS||"");if(b.options?.head!==false)instructions+="\n\n"+(m.SWAP_CABECA||"");
  const note=`Operator request: ${String(b.note||"").slice(0,4000)}\nWrite the required <prompt> and <notas> blocks. Describe only the supplied images.`;
- const {job,fresh}=await reserve(a,b,"prompt",c.promptCost,"Prompt · Body swap");if(!fresh)return {id:job.id,state:job.state,result:job.result?JSON.parse(job.result):null};let sent=false;
+ const {job,fresh}=await reserve(a,b,"prompt",c.promptCost,"Prompt · Body swap");if(!fresh)return {id:job.id,state:job.state,result:job.result?JSON.parse(job.result):null,error:job.error||undefined};let sent=false;
  try{
   const key=await secret("openai_key");await update(job.id,"submitting");sent=true;const res=await fetch("https://api.openai.com/v1/responses",{method:"POST",headers:{Authorization:`Bearer ${key}`,"Content-Type":"application/json"},body:promptBody(c.model,instructions,note,images),signal:AbortSignal.timeout(110000)});
   if(!res.ok){await update(job.id,"rejected",{error:`Gerador respondeu HTTP ${res.status}.`,refund:true});return {id:job.id,state:"rejected",error:`Gerador respondeu HTTP ${res.status}.`};}
@@ -83,6 +85,7 @@ export async function route(req:Request,path:string[]){
  if(req.method!=="GET"&&req.headers.get("origin")!==new URL(req.url).origin)throw new AppError(403,"Origem inválida.");
  const a=await account(),key=path.join("/");
  if(req.method==="GET"&&key==="init"){
+  await recoverPrompts();
   const usage=await db().prepare("SELECT COALESCE(SUM(cost),0) AS used FROM jobs WHERE owner=? AND period=? AND charged=1").bind(a.id,month()).first<any>();
   return {account:a,used:usage?.used||0,config:await configuration(),jobs:(await db().prepare("SELECT id,kind,title,state,cost,charged,remote_id,result,error,created,updated FROM jobs WHERE owner=? ORDER BY created DESC LIMIT 100").bind(a.id).all()).results,media:(await db().prepare("SELECT id,name,mime,bytes,model,category,created FROM media WHERE owner=? ORDER BY created DESC LIMIT 500").bind(a.id).all()).results};
  }
