@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { currentUser, mayBootstrap, authMode } from "./auth";
+import { currentUser, mayBootstrap, adminEmails, authMode } from "./auth";
 import { AppError, ACTIVE, month, integer, cleanOptions, price, parseOutput, taskId, RESERVE_SQL, WORKFLOW_ID, RECOVER_PROMPTS_SQL, PROMPT_RECOVERY_MS, PROMPT_TIMEOUT_MS, PROMPT_HEARTBEAT_MS } from "./core";
 import { buildGraph, validateGraph } from "./workflow";
 import moldes from "./source/moldes.json";
@@ -19,9 +19,11 @@ async function encrypt(s:string){const iv=crypto.getRandomValues(new Uint8Array(
 async function secret(name:string){const s=await setting(name);if(!s)throw new AppError(503,"Integração ainda não configurada pelo administrador.");const [iv,cipher]=s.split(".");return new TextDecoder().decode(await crypto.subtle.decrypt({name:"AES-GCM",iv:unb64(iv)},await encryptionKey(),unb64(cipher)));}
 export async function account():Promise<Account>{
  const u=await currentUser();if(!u)throw new AppError(401,"Entre para acessar o estúdio.");
+ // The identity provider verified this email, so a listed administrator is (re)linked and promoted here.
+ if(adminEmails().includes(u.email.toLowerCase()))await db().prepare("INSERT INTO accounts(id,user_id,email,name,role,active,budget,concurrent,created) VALUES(?,?,?,?,'admin',1,1000,2,?) ON CONFLICT(email) DO UPDATE SET role='admin',active=1,user_id=excluded.user_id").bind(uuid(),u.userId,u.email.toLowerCase(),u.displayName,now()).run();
  let a=await db().prepare("SELECT * FROM accounts WHERE user_id=?").bind(u.userId).first<Account>();
  if(!a){
-  if(mayBootstrap(u.email))await db().prepare("INSERT INTO accounts(id,user_id,email,name,role,active,budget,concurrent,created) SELECT ?,?,?,?,'admin',1,1000,2,? WHERE NOT EXISTS(SELECT 1 FROM accounts) AND NOT EXISTS(SELECT 1 FROM settings WHERE key='bootstrap_closed')").bind(uuid(),u.userId,u.email.toLowerCase(),u.displayName,now()).run();
+  if(mayBootstrap())await db().prepare("INSERT INTO accounts(id,user_id,email,name,role,active,budget,concurrent,created) SELECT ?,?,?,?,'admin',1,1000,2,? WHERE NOT EXISTS(SELECT 1 FROM accounts) AND NOT EXISTS(SELECT 1 FROM settings WHERE key='bootstrap_closed')").bind(uuid(),u.userId,u.email.toLowerCase(),u.displayName,now()).run();
   a=await db().prepare("SELECT * FROM accounts WHERE user_id=?").bind(u.userId).first<Account>();
   if(a)await putSetting("bootstrap_closed","true");
   else{await db().prepare("UPDATE accounts SET user_id=? WHERE email=? AND user_id IS NULL AND active=1").bind(u.userId,u.email.toLowerCase()).run();a=await db().prepare("SELECT * FROM accounts WHERE user_id=?").bind(u.userId).first<Account>();}

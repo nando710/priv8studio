@@ -16,8 +16,7 @@ export async function currentUser():Promise<User|null> {
  if(!identity)throw new AppError(403,"Acesso não autorizado. Entre pelo login do Cloudflare Access e tente novamente.");
  return {...identity,displayName:identity.email};
 }
-// The first account becomes admin. With ADMIN_EMAIL set, only that email may claim it.
-export function mayBootstrap(email:string) {
- if(env.ADMIN_EMAIL)return email.toLowerCase()===env.ADMIN_EMAIL.trim().toLowerCase();
- return env.ALLOW_PRIVATE_BOOTSTRAP==="true";
-}
+// ADMIN_EMAIL lists the administrators (comma-separated). They are always admins, so the list is the
+// source of truth; without it, the Sites bootstrap makes the first account admin.
+export const adminEmails = () => String(env.ADMIN_EMAIL||"").split(/[\s,;]+/).map(e=>e.trim().toLowerCase()).filter(Boolean);
+export const mayBootstrap = () => !adminEmails().length && env.ALLOW_PRIVATE_BOOTSTRAP==="true";

@@ -60,7 +60,7 @@ Na aba **Variables**, crie:
 | `CF_D1_DATABASE_ID` | o Database ID do passo 2 |
 | `ACCESS_TEAM_DOMAIN` | `NOME-DA-EQUIPE.cloudflareaccess.com` |
 | `ACCESS_AUD` | o AUD Tag do passo 4 |
-| `ADMIN_EMAIL` | o seu e-mail, que vira administrador no primeiro acesso |
+| `ADMIN_EMAIL` | os e-mails dos administradores, separados por vírgula |
 
 Se você usou outros nomes, crie também `CF_D1_DATABASE_NAME`, `CF_R2_BUCKET` ou `CF_WORKER_NAME`. Os padrões são `priv8studio`, `priv8studio-acervo` e `priv8studio`.
 
@@ -72,7 +72,7 @@ Coloque o código no branch `main`. A ação **Publicar na Cloudflare** roda os 
 
 ## 8. Primeiro acesso
 
-1. Abra `https://priv8studio.SEU-SUBDOMINIO.workers.dev` e entre com o `ADMIN_EMAIL`. Esse primeiro acesso cria o administrador.
+1. Abra `https://priv8studio.SEU-SUBDOMINIO.workers.dev` e entre com um dos e-mails de `ADMIN_EMAIL`. Esses e-mails são sempre administradores.
 2. Em **Configurações**, cadastre a chave do RunningHub, o workflow 28C em formato API e a chave da OpenAI.
 3. Para cada membro, libere o e-mail na política do Access (passo 4) **e** cadastre em **Contas e limites**.
 
