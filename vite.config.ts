@@ -36,6 +36,33 @@ const localBindingConfig = {
     : [],
 };
 
+// Self-hosted deploys (scripts/deploy-cloudflare.mjs) set CF_D1_DATABASE_ID. Their builds name the
+// real D1/R2 resources and always require Cloudflare Access, so identity headers are never trusted.
+const env = process.env;
+const selfHostConfig = env.CF_D1_DATABASE_ID
+  ? {
+      name: env.CF_WORKER_NAME || "priv8studio",
+      workers_dev: true,
+      preview_urls: false,
+      d1_databases: [
+        {
+          binding: "DB",
+          database_name: env.CF_D1_DATABASE_NAME || "priv8studio",
+          database_id: env.CF_D1_DATABASE_ID,
+        },
+      ],
+      r2_buckets: [
+        { binding: "BUCKET", bucket_name: env.CF_R2_BUCKET || "priv8studio-acervo" },
+      ],
+      vars: {
+        AUTH_MODE: "access",
+        ACCESS_TEAM_DOMAIN: env.ACCESS_TEAM_DOMAIN || "",
+        ACCESS_AUD: env.ACCESS_AUD || "",
+        ADMIN_EMAIL: env.ADMIN_EMAIL || "",
+      },
+    }
+  : {};
+
 export default defineConfig(async ({ command }) => {
   // Use Miniflare's local Request.cf placeholder unless fetching is requested.
   process.env.CLOUDFLARE_CF_FETCH_ENABLED ??= "false";
@@ -69,6 +96,7 @@ export default defineConfig(async ({ command }) => {
         inspectorPort: false,
         config: {
           ...localBindingConfig,
+          ...(command === "build" ? selfHostConfig : {}),
           ...(command === "serve"
             ? {
                 services: [

@@ -1,9 +1,10 @@
 import { env } from "cloudflare:workers";
-import { getChatGPTUser } from "../app/chatgpt-auth";
-import { AppError, ACTIVE, month, integer, cleanOptions, price, parseOutput, taskId, RESERVE_SQL, WORKFLOW_ID, RECOVER_PROMPTS_SQL, PROMPT_RECOVERY_MS } from "./core";
+import { currentUser, mayBootstrap, adminEmails, authMode } from "./auth";
+import { AppError, ACTIVE, month, integer, cleanOptions, price, parseOutput, taskId, RESERVE_SQL, WORKFLOW_ID, RECOVER_PROMPTS_SQL, PROMPT_RECOVERY_MS, PROMPT_TIMEOUT_MS, PROMPT_HEARTBEAT_MS } from "./core";
 import { buildGraph, validateGraph } from "./workflow";
 import moldes from "./source/moldes.json";
-import { promptBody, type PromptImage } from "./prompt-body";
+import { promptBody, PROMPT_IMAGE_BYTES, type PromptImage } from "./prompt-body";
+import { eventStream, parsePrompt, readPromptStream } from "./prompt-stream";
 type Account={id:string;user_id:string;email:string;name:string;role:string;active:number;budget:number;concurrent:number};
 const db=()=>{if(!env.DB)throw new AppError(503,"Banco de dados indisponível.");return env.DB;};
 const bucket=()=>{if(!env.BUCKET)throw new AppError(503,"Acervo indisponível.");return env.BUCKET;};
@@ -17,10 +18,12 @@ async function encryptionKey(){if(!env.CREDENTIAL_ENCRYPTION_KEY)throw new AppEr
 async function encrypt(s:string){const iv=crypto.getRandomValues(new Uint8Array(12));const result=await crypto.subtle.encrypt({name:"AES-GCM",iv},await encryptionKey(),new TextEncoder().encode(s));return b64(iv)+"."+b64(new Uint8Array(result));}
 async function secret(name:string){const s=await setting(name);if(!s)throw new AppError(503,"Integração ainda não configurada pelo administrador.");const [iv,cipher]=s.split(".");return new TextDecoder().decode(await crypto.subtle.decrypt({name:"AES-GCM",iv:unb64(iv)},await encryptionKey(),unb64(cipher)));}
 export async function account():Promise<Account>{
- const u=await getChatGPTUser();if(!u)throw new AppError(401,"Entre para acessar o estúdio.");
+ const u=await currentUser();if(!u)throw new AppError(401,"Entre para acessar o estúdio.");
+ // The identity provider verified this email, so a listed administrator is (re)linked and promoted here.
+ if(adminEmails().includes(u.email.toLowerCase()))await db().prepare("INSERT INTO accounts(id,user_id,email,name,role,active,budget,concurrent,created) VALUES(?,?,?,?,'admin',1,1000,2,?) ON CONFLICT(email) DO UPDATE SET role='admin',active=1,user_id=excluded.user_id").bind(uuid(),u.userId,u.email.toLowerCase(),u.displayName,now()).run();
  let a=await db().prepare("SELECT * FROM accounts WHERE user_id=?").bind(u.userId).first<Account>();
  if(!a){
-  if(env.ALLOW_PRIVATE_BOOTSTRAP==="true")await db().prepare("INSERT INTO accounts(id,user_id,email,name,role,active,budget,concurrent,created) SELECT ?,?,?,?,'admin',1,1000,2,? WHERE NOT EXISTS(SELECT 1 FROM accounts) AND NOT EXISTS(SELECT 1 FROM settings WHERE key='bootstrap_closed')").bind(uuid(),u.userId,u.email.toLowerCase(),u.displayName,now()).run();
+  if(mayBootstrap())await db().prepare("INSERT INTO accounts(id,user_id,email,name,role,active,budget,concurrent,created) SELECT ?,?,?,?,'admin',1,1000,2,? WHERE NOT EXISTS(SELECT 1 FROM accounts) AND NOT EXISTS(SELECT 1 FROM settings WHERE key='bootstrap_closed')").bind(uuid(),u.userId,u.email.toLowerCase(),u.displayName,now()).run();
   a=await db().prepare("SELECT * FROM accounts WHERE user_id=?").bind(u.userId).first<Account>();
   if(a)await putSetting("bootstrap_closed","true");
   else{await db().prepare("UPDATE accounts SET user_id=? WHERE email=? AND user_id IS NULL AND active=1").bind(u.userId,u.email.toLowerCase()).run();a=await db().prepare("SELECT * FROM accounts WHERE user_id=?").bind(u.userId).first<Account>();}
@@ -68,18 +71,36 @@ async function submit(a:Account,b:any){
 async function generate(a:Account,b:any){
  const c=await configuration();if(!c.prompts)throw new AppError(409,"Conecte o gerador de prompts em Configurações.");
  const files=b.files||{};if(!files.scene||!files.front)throw new AppError(400,"Selecione a cena e a modelo.");
- const images:PromptImage[]=[],labels:Record<string,string>={scene:"<image1>: base scene, preserve outfit and pose",front:"<image2>: adult model, front view",back:"Extra reference: back view",left:"Extra reference: left side",right:"Extra reference: right side"};
- for(const [k,label]of Object.entries(labels))if(files[k]){const row=await ownMedia(a,files[k]);images.push({label,mime:row.mime,open:async()=>{const obj=await bucket().get(row.object_key);if(!obj)throw new AppError(404,"Arquivo indisponível.");return obj.body;}});}
- const m:any=moldes;let instructions=m.PROMPT_SISTEMA||"";if(!instructions)throw new AppError(503,"Molde indisponível.");if(files.back||files.left||files.right)instructions+="\n\n"+(m.SWAP_VISTAS||"");if(b.options?.head!==false)instructions+="\n\n"+(m.SWAP_CABECA||"");
- const note=`Operator request: ${String(b.note||"").slice(0,4000)}\nWrite the required <prompt> and <notas> blocks. Describe only the supplied images.`;
- const {job,fresh}=await reserve(a,b,"prompt",c.promptCost,"Prompt · Body swap");if(!fresh)return {id:job.id,state:job.state,result:job.result?JSON.parse(job.result):null,error:job.error||undefined};let sent=false;
- try{
-  const key=await secret("openai_key");await update(job.id,"submitting");sent=true;const res=await fetch("https://api.openai.com/v1/responses",{method:"POST",headers:{Authorization:`Bearer ${key}`,"Content-Type":"application/json"},body:promptBody(c.model,instructions,note,images),signal:AbortSignal.timeout(110000)});
-  if(!res.ok){await update(job.id,"rejected",{error:`Gerador respondeu HTTP ${res.status}.`,refund:true});return {id:job.id,state:"rejected",error:`Gerador respondeu HTTP ${res.status}.`};}
-  const r:any=await res.json();const text=(r.output||[]).filter((x:any)=>x.type==="message").flatMap((x:any)=>x.content||[]).filter((x:any)=>x.type==="output_text").map((x:any)=>x.text).join("\n");
-  const raw=/<prompt>([\s\S]*?)<\/prompt>/.exec(text)?.[1]?.trim();if(r.status!=="completed"||!raw)throw new AppError(502,"O gerador não devolveu um prompt completo. Confira o histórico antes de tentar novamente.");
-  const head=/\n\s*(head_swap:[\s\S]*)/i.exec(raw);const result={prompt:head?raw.slice(0,head.index).trim():raw,headPrompt:head?.[1]||"",notes:/<notas>([\s\S]*?)<\/notas>/.exec(text)?.[1]?.trim()||""};await update(job.id,"SUCCESS",{result});return {id:job.id,state:"SUCCESS",result};
- }catch(e){const error=e instanceof AppError?e.message:"Resposta do gerador não confirmada.";await update(job.id,sent?"unknown":"rejected",{error,refund:!sent});return {id:job.id,state:sent?"unknown":"rejected",error};}
+ // Labels follow the moldes: SWAP_VISTAS expects BACK VIEW / LEFT SIDE VIEW / RIGHT SIDE VIEW.
+ const images:PromptImage[]=[],labels:Record<string,string>={scene:"<image1>: base scene, preserve outfit and pose",front:"<image2>: adult model, FRONT VIEW",back:"BACK VIEW of the same model",left:"LEFT SIDE VIEW of the same model (her anatomical left side)",right:"RIGHT SIDE VIEW of the same model (her anatomical right side)"};
+ let bytes=0;const views:string[]=[];
+ for(const [k,label]of Object.entries(labels))if(files[k]){const row=await ownMedia(a,files[k]);bytes+=Number(row.bytes)||0;if(!["scene","front"].includes(k))views.push(label.split(" of ")[0]);images.push({label,mime:row.mime,open:async()=>{const obj=await bucket().get(row.object_key);if(!obj)throw new AppError(404,"Arquivo indisponível.");return obj.body;}});}
+ if(bytes>PROMPT_IMAGE_BYTES)throw new AppError(413,`As fotos somam ${(bytes/1e6).toFixed(1)} MB e o gerador aceita até ${PROMPT_IMAGE_BYTES/1e6} MB por vez. Use fotos menores ou menos vistas extras.`);
+ const m:any=moldes;let instructions=m.PROMPT_SISTEMA||"";if(!instructions)throw new AppError(503,"Molde indisponível.");if(views.length)instructions+="\n\n"+(m.SWAP_VISTAS||"");if(b.options?.head!==false)instructions+="\n\n"+(m.SWAP_CABECA||"");
+ const note=`${views.length?`Extra views sent: ${views.join(", ")}.\n`:""}Operator request: ${String(b.note||"").slice(0,4000)}\nWrite the required <prompt> and <notas> blocks. Describe only the supplied images.`;
+ const {job,fresh}=await reserve(a,b,"prompt",c.promptCost,"Prompt · Body swap");if(!fresh)return {id:job.id,state:job.state,result:job.result?JSON.parse(job.result):null,error:job.error||undefined};
+ const stream=eventStream(async(send,signal)=>{
+  let sent=false;
+  // A live attempt refreshes its timestamp; one killed with the connection goes stale and is recovered.
+  const alive=setInterval(()=>{db().prepare("UPDATE jobs SET updated=? WHERE id=? AND state='submitting'").bind(now(),job.id).run().catch(()=>{});},PROMPT_HEARTBEAT_MS);
+  const fail=async(state:string,error:string,refund=false)=>{await update(job.id,state,{error,refund});return {id:job.id,state,error};};
+  try{
+   const key=await secret("openai_key");await update(job.id,"submitting");sent=true;
+   const res=await fetch("https://api.openai.com/v1/responses",{method:"POST",headers:{Authorization:`Bearer ${key}`,"Content-Type":"application/json"},body:promptBody(c.model,instructions,note,images),signal:AbortSignal.any([signal,AbortSignal.timeout(PROMPT_TIMEOUT_MS)])});
+   if(!res.ok||!res.body){let detail="";try{detail=String((await res.json() as any)?.error?.message||"").slice(0,300);}catch{}return fail("rejected",`Gerador respondeu HTTP ${res.status}${detail?`: ${detail}`:"."}`,true);}
+   send({type:"progress",phase:"thinking"});
+   const r=await readPromptStream(res.body,chars=>send({type:"progress",phase:"writing",chars}));
+   // Known outcomes are final: they must not keep holding a concurrency slot like "unknown" does.
+   if(r.status==="incomplete")return fail("failed",r.reason==="max_output_tokens"?"O gerador atingiu o limite de tamanho da resposta antes de terminar o prompt. Tente de novo ou use um modelo mais rápido em Configurações.":`O gerador parou antes de terminar (${r.reason||"motivo não informado"}).`);
+   if(r.status==="failed")return fail("failed",`O gerador falhou: ${r.error.slice(0,300)||"erro não informado"}.`);
+   const result=parsePrompt(r.text);if(r.status!=="completed"||!result)return fail("failed","O gerador não devolveu um prompt completo. Confira o histórico antes de tentar novamente.");
+   await update(job.id,"SUCCESS",{result});return {id:job.id,state:"SUCCESS",result};
+  }catch(e){
+   const error=e instanceof AppError?e.message:signal.aborted?"A geração foi interrompida porque a página foi fechada ou a conexão caiu.":e instanceof Error&&e.name==="TimeoutError"?`O gerador não respondeu em ${PROMPT_TIMEOUT_MS/60000} minutos.`:"Resposta do gerador não confirmada.";
+   return fail(sent?"interrupted":"rejected",error,!sent);
+  }finally{clearInterval(alive);}
+ });
+ return new Response(stream,{headers:{"Content-Type":"application/x-ndjson; charset=utf-8","Cache-Control":"no-store","X-Content-Type-Options":"nosniff"}});
 }
 export async function route(req:Request,path:string[]){
  if(req.method!=="GET"&&req.headers.get("origin")!==new URL(req.url).origin)throw new AppError(403,"Origem inválida.");
@@ -87,7 +108,7 @@ export async function route(req:Request,path:string[]){
  if(req.method==="GET"&&key==="init"){
   await recoverPrompts();
   const usage=await db().prepare("SELECT COALESCE(SUM(cost),0) AS used FROM jobs WHERE owner=? AND period=? AND charged=1").bind(a.id,month()).first<any>();
-  return {account:a,used:usage?.used||0,config:await configuration(),jobs:(await db().prepare("SELECT id,kind,title,state,cost,charged,remote_id,result,error,created,updated FROM jobs WHERE owner=? ORDER BY created DESC LIMIT 100").bind(a.id).all()).results,media:(await db().prepare("SELECT id,name,mime,bytes,model,category,created FROM media WHERE owner=? ORDER BY created DESC LIMIT 500").bind(a.id).all()).results};
+  return {account:a,auth:authMode(),used:usage?.used||0,config:await configuration(),jobs:(await db().prepare("SELECT id,kind,title,state,cost,charged,remote_id,result,error,created,updated FROM jobs WHERE owner=? ORDER BY created DESC LIMIT 100").bind(a.id).all()).results,media:(await db().prepare("SELECT id,name,mime,bytes,model,category,created FROM media WHERE owner=? ORDER BY created DESC LIMIT 500").bind(a.id).all()).results};
  }
  if(key==="media"&&req.method==="POST"){
   if(Number(req.headers.get("content-length")||0)>16_000_000)throw new AppError(413,"Limite de 15 MB por imagem.");const f=await req.formData(),file=f.get("file");
