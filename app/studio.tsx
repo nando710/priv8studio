@@ -5,7 +5,7 @@ import { CATALOGO } from "../lib/source/catalogo";
 import { readApiResponse, readApiStream } from "../lib/http-response";
 
 type Media={id:string;name:string;model:string;category:string;mime:string};
-type Job={id:string;kind:string;title:string;state:string;cost:number;charged:number;remote_id:string;result:string;error:string;created:number};
+type Job={id:string;kind:string;title:string;state:string;cost:number;charged:number;remote_id:string;result:string;error:string;created:number;scene?:string|null};
 type Data={account:any;auth?:string;used:number;jobs:Job[];media:Media[];config:any};
 const nav=[{id:"create",name:"Criar",icon:WandSparkles},{id:"catalog",name:"Ferramentas",icon:Layers},{id:"library",name:"Meu acervo",icon:Library},{id:"jobs",name:"Execuções",icon:Clock3}];
 const labels:Record<string,string>={SUCCESS:"Concluída",RUNNING:"Processando",QUEUED:"Na fila",preparing:"Preparando",submitting:"Enviando",unknown:"Revisão necessária",failed:"Falhou",interrupted:"Interrompida · revisar",rejected:"Não iniciada",refunded:"Estornada"};
@@ -18,7 +18,7 @@ const signOutPath=(mode?:string)=>mode==="access"?"/cdn-cgi/access/logout":"/sig
 const date=(t:number)=>new Date(t).toLocaleString("pt-BR",{dateStyle:"short",timeStyle:"short"});
 const clock=(ms:number)=>{const s=Math.max(0,Math.floor(ms/1000));return `${Math.floor(s/60)}:${String(s%60).padStart(2,"0")}`;};
 type AgentInfo={id:string;name:string;description:string;group:string;prompt:string;custom:boolean;defaultLength:number};
-type Creation={key:string;jobId:string;output:number;url:string;label:string;created:number};
+type Creation={key:string;jobId:string;output:number;url:string;label:string;created:number;scene:string|null};
 type Refining={creation:Creation;loading:boolean;files:Record<string,string>;missing:string[];options:any;prompt:string;headPrompt:string;note:string;instructions:string;notes:string;ajustes:{id:string;valor:number;motivo:string}[];error:string};
 const OUTPUT_LABELS:Record<string,string>={"61":"Corpo","37":"Cabeça","44":"Tatuagens","51":"Máscara","66":"Upscale"};
 const RUNNING_STATES=["preparing","submitting","QUEUED","RUNNING"];
@@ -77,7 +77,7 @@ export default function Studio(){
   finally{setProgress(null);await refresh().catch(()=>{});}
  }
  const progressText=progress?`${progress.phase==="writing"?`Escrevendo o prompt · ${progress.chars.toLocaleString("pt-BR")} caracteres`:progress.phase==="thinking"?"Analisando as fotos":"Enviando as fotos"} · ${clock(Date.now()-progress.started)}`:"";
- const creations:Creation[]=data?data.jobs.filter(j=>j.kind==="image"&&j.state==="SUCCESS").flatMap(j=>{const r=result(j);return Array.isArray(r)?r.map((o:any,index:number)=>({o,index})).filter(({o})=>typeof o?.url==="string"&&!/\.(mp4|webm|mov)(\?|$)/i.test(o.url)).map(({o,index})=>({key:`${j.id}-${index}`,jobId:j.id,output:index,url:o.url as string,label:OUTPUT_LABELS[o.node]||"Resultado",created:j.created})):[];}):[];
+ const creations:Creation[]=data?data.jobs.filter(j=>j.kind==="image"&&j.state==="SUCCESS").flatMap(j=>{const r=result(j);return Array.isArray(r)?r.map((o:any,index:number)=>({o,index})).filter(({o})=>typeof o?.url==="string"&&!/\.(mp4|webm|mov)(\?|$)/i.test(o.url)).map(({o,index})=>({key:`${j.id}-${index}`,jobId:j.id,output:index,url:o.url as string,label:OUTPUT_LABELS[o.node]||"Resultado",created:j.created,scene:typeof j.scene==="string"?j.scene:null})):[];}):[];
  useEffect(()=>{if(viewer===null)return;const key=(e:KeyboardEvent)=>{if(e.key==="Escape")setViewer(null);if(e.key==="ArrowRight")setViewer(v=>v===null?v:Math.min(v+1,creations.length-1));if(e.key==="ArrowLeft")setViewer(v=>v===null?v:Math.max(v-1,0));};window.addEventListener("keydown",key);return()=>window.removeEventListener("keydown",key);},[viewer,creations.length]);
  const blocker=!data?"":!ready?"Integração pendente":!files.scene?"Escolha a foto da cena":!files.front?"Escolha a sua modelo":!prompt.trim()?"Gere ou escreva o prompt":cost>data.account.budget-data.used?"Créditos insuficientes":"";
  // Refine: load the settings a creation used, let the user adjust them, then improve the prompt and render again.
@@ -190,8 +190,22 @@ export default function Studio(){
     </footer>
    </div>
   </section></div>}
-  {viewer!==null&&creations[viewer]&&<div className="lightbox" onClick={()=>setViewer(null)} role="dialog" aria-modal="true" aria-label="Criação"><figure onClick={e=>e.stopPropagation()} key={creations[viewer].key}><img src={creations[viewer].url} alt={creations[viewer].label} referrerPolicy="no-referrer"/><figcaption><div><b>{creations[viewer].label}</b><small>{date(creations[viewer].created)} · {viewer+1} de {creations.length}</small></div><div className="inline"><button className="secondary" onClick={()=>openRefine(creations[viewer])}><WandSparkles size={15}/>Refinar imagem</button><a className="primary" href={creations[viewer].url} target="_blank" rel="noreferrer"><Download size={15}/>Abrir original</a></div></figcaption></figure><button className="lightbox-nav prev" disabled={viewer===0} onClick={e=>{e.stopPropagation();setViewer(viewer-1);}} aria-label="Anterior"><ChevronLeft size={22}/></button><button className="lightbox-nav next" disabled={viewer>=creations.length-1} onClick={e=>{e.stopPropagation();setViewer(viewer+1);}} aria-label="Próxima"><ChevronRight size={22}/></button><button className="lightbox-close icon-button" onClick={()=>setViewer(null)} aria-label="Fechar"><X size={22}/></button></div>}
+  {viewer!==null&&creations[viewer]&&<div className="lightbox" onClick={()=>setViewer(null)} role="dialog" aria-modal="true" aria-label="Criação"><figure onClick={e=>e.stopPropagation()} key={creations[viewer].key}><Compare after={creations[viewer].url} before={creations[viewer].scene?`/api/media/${creations[viewer].scene}`:null} label={creations[viewer].label}/><figcaption><div><b>{creations[viewer].label}</b><small>{date(creations[viewer].created)} · {viewer+1} de {creations.length}</small></div><div className="inline"><button className="secondary" onClick={()=>openRefine(creations[viewer])}><WandSparkles size={15}/>Refinar imagem</button><a className="primary" href={creations[viewer].url} target="_blank" rel="noreferrer"><Download size={15}/>Abrir original</a></div></figcaption></figure><button className="lightbox-nav prev" disabled={viewer===0} onClick={e=>{e.stopPropagation();setViewer(viewer-1);}} aria-label="Anterior"><ChevronLeft size={22}/></button><button className="lightbox-nav next" disabled={viewer>=creations.length-1} onClick={e=>{e.stopPropagation();setViewer(viewer+1);}} aria-label="Próxima"><ChevronRight size={22}/></button><button className="lightbox-close icon-button" onClick={()=>setViewer(null)} aria-label="Fechar"><X size={22}/></button></div>}
   {toast&&<div className="toast" role="status"><span>{toast}</span><button className="icon-button" onClick={()=>setToast("")} aria-label="Fechar aviso"><X size={15}/></button></div>}
+ </div>;
+}
+// Before/after slider: the original scene on the left of the handle, the body swap on the right.
+// It opens on the original and sweeps to the middle so the change is visible at once.
+function Compare({after,before,label}:{after:string;before:string|null;label:string}){
+ const [pos,setPos]=useState(100),[dragging,setDragging]=useState(false),[ready,setReady]=useState(false),[broken,setBroken]=useState(false),box=useRef<HTMLDivElement>(null);
+ const active=!!before&&!broken;
+ useEffect(()=>{if(!active||!ready)return;const t=setTimeout(()=>setPos(50),250);return()=>clearTimeout(t);},[active,ready]);
+ const move=(x:number)=>{const r=box.current?.getBoundingClientRect();if(r&&r.width)setPos(Math.max(0,Math.min(100,(x-r.left)/r.width*100)));};
+ return <div ref={box} className={`compare ${active?"on":""} ${dragging?"dragging":""}`} onPointerDown={e=>{if(!active)return;e.currentTarget.setPointerCapture(e.pointerId);setDragging(true);move(e.clientX);}} onPointerMove={e=>{if(dragging)move(e.clientX);}} onPointerUp={()=>setDragging(false)} onPointerCancel={()=>setDragging(false)}>
+  <img className="compare-after" src={after} alt={label} referrerPolicy="no-referrer" draggable={false} onLoad={()=>setReady(true)}/>
+  {active&&<><img className="compare-before" src={before!} alt="Cena original" draggable={false} onError={()=>setBroken(true)} style={{clipPath:`inset(0 ${100-pos}% 0 0)`}}/>
+   <div className="compare-handle" style={{left:`${pos}%`}} role="slider" tabIndex={0} aria-label="Comparar com a cena original" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(pos)} onKeyDown={e=>{if(e.key!=="ArrowLeft"&&e.key!=="ArrowRight")return;e.preventDefault();e.stopPropagation();setPos(p=>Math.max(0,Math.min(100,p+(e.key==="ArrowLeft"?-5:5))));}}><span><ChevronLeft size={14}/><ChevronRight size={14}/></span></div>
+   <span className="compare-label before" style={{opacity:pos>12?1:0}}>Original</span><span className="compare-label after" style={{opacity:pos<88?1:0}}>Body swap</span></>}
  </div>;
 }
 // Images fade and unblur in once loaded; provider links never receive our URL as referrer.

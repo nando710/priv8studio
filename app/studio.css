@@ -66,6 +66,17 @@ button,.primary,a.primary{transition:background .18s,border-color .18s,transform
 .agent-text{min-height:max(320px,calc(100vh - 430px));font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;line-height:1.65;color:#cfd8c6;background:#111411;resize:vertical;tab-size:2}
 .agent-footer{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}.agent-footer>span{font-size:10px;color:#7f8b79;font-variant-numeric:tabular-nums}.agent-footer .inline{gap:8px}.agent-footer button{font-size:12px}
 @media(max-width:940px){.agents-layout{grid-template-columns:1fr}.agents-list{position:static}.agent-text{min-height:60vh}}
+.compare{position:relative;display:inline-block;max-width:100%;align-self:center;border-radius:10px;overflow:hidden;box-shadow:0 30px 80px #000;user-select:none;-webkit-user-select:none}
+.compare.on{cursor:ew-resize;touch-action:none}
+.lightbox .compare img{border-radius:0;box-shadow:none}
+.lightbox .compare-after{display:block;max-width:100%;max-height:calc(100vh - 160px)}
+.lightbox .compare-before{position:absolute;inset:0;width:100%;height:100%;max-width:none;max-height:none;object-fit:contain;background:#0b0d0b;transition:clip-path .9s var(--ease-out)}
+.compare-handle{position:absolute;top:0;bottom:0;width:2px;margin-left:-1px;background:#f4ffe4;box-shadow:0 0 0 1px #0004,0 0 18px #d2f88666;transition:left .9s var(--ease-out);outline:none}
+.compare-handle span{position:absolute;top:50%;left:50%;width:42px;height:42px;margin:-21px 0 0 -21px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:var(--lime);color:#15200a;box-shadow:0 6px 24px #000a;transition:transform .25s var(--ease-spring)}
+.compare-handle:focus-visible span,.compare.dragging .compare-handle span,.compare-handle:hover span{transform:scale(1.12)}
+.compare.dragging .compare-before,.compare.dragging .compare-handle{transition:none}
+.compare-label{position:absolute;top:14px;font-size:10px;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;padding:6px 10px;border-radius:20px;background:#0b0d0bcc;backdrop-filter:blur(6px);color:#eef5e5;pointer-events:none;transition:opacity .25s}
+.compare-label.before{left:14px}.compare-label.after{right:14px;color:var(--lime)}
 /* Create page: creations fill the screen, the composer floats on top */
 .main.create-mode{max-width:none;padding:0;animation:none}
 .create-page{position:relative;min-height:calc(100vh - 67px);display:flex;flex-direction:column}
