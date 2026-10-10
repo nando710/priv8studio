@@ -30,6 +30,21 @@ export async function readPromptStream(body:ReadableStream<Uint8Array>,progress:
  // The final response object is authoritative; the deltas cover streams that end without one.
  return {status:final?.status||(error?"failed":"unknown"),text:outputText(final)||text,reason:String(final?.incomplete_details?.reason||""),error:error||String(final?.error?.message||"")};
 }
+// Chat Completions stream: the text arrives in choices[0].delta.content and finish_reason closes it.
+export async function readChatStream(body:ReadableStream<Uint8Array>,progress:(chars:number)=>void=()=>{}):Promise<StreamResult> {
+ let text="",finish="",error="";
+ for await(const e of sseEvents(body)){
+  if(e.error){error=String(e.error.message||e.error||"erro desconhecido");continue;}
+  const choice=e.choices?.[0];if(!choice)continue;
+  if(typeof choice.delta?.content==="string"&&choice.delta.content){text+=choice.delta.content;progress(text.length);}
+  if(choice.finish_reason)finish=String(choice.finish_reason);
+ }
+ if(error)return {status:"failed",text,reason:"",error};
+ if(finish==="length")return {status:"incomplete",text,reason:"max_output_tokens",error:""};
+ if(finish==="content_filter")return {status:"failed",text,reason:"",error:"a resposta foi bloqueada pelo filtro de conteúdo"};
+ // Some gateways drop finish_reason; the parser still rejects a prompt that was cut off.
+ return {status:text?"completed":"unknown",text,reason:"",error:""};
+}
 export function parsePrompt(text:string) {
  const raw=/<prompt>([\s\S]*?)<\/prompt>/.exec(text)?.[1]?.trim();if(!raw)return null;
  const head=/\n\s*(head_swap:[\s\S]*)/i.exec(raw);
