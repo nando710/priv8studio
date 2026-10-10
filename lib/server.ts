@@ -39,7 +39,11 @@ async function rh(path:string,payload:any,form?:FormData){
  try{if(form)form.set("apiKey",key);res=await fetch(`https://www.runninghub.ai${path}`,{method:"POST",headers:{Authorization:`Bearer ${key}`,...(!form?{"Content-Type":"application/json"}:{})},body:form||JSON.stringify({...payload,apiKey:key}),signal:AbortSignal.timeout(55000)});}catch{throw new AppError(502,"Resposta do RunningHub não confirmada.");}
  if(!res.ok)throw new AppError(502,`RunningHub respondeu HTTP ${res.status}.`);try{return await res.json() as any;}catch{throw new AppError(502,"Resposta inválida do RunningHub.");}
 }
-async function configuration(){return {runninghub:!!await setting("runninghub_key"),prompts:!!await setting("openai_key"),template:!!await setting("workflow_template"),workflowId:WORKFLOW_ID,baseCost:Number(await setting("base_cost","10")),promptCost:Number(await setting("prompt_cost","1")),globalLimit:Number(await setting("global_limit","2")),model:await setting("prompt_model","gpt-6.1-sol")};}
+// Prompt writers speak the OpenAI Responses API; xAI (Grok) serves the same API at its own base URL.
+const PROMPT_PROVIDERS={openai:{key:"openai_key",url:"https://api.openai.com/v1/responses",model:"gpt-6.1-sol"},xai:{key:"xai_key",url:"https://api.x.ai/v1/responses",model:"grok-4.7"}} as const;
+type ProviderId=keyof typeof PROMPT_PROVIDERS;
+async function promptProvider(){const id=await setting("prompt_provider","openai");return (id in PROMPT_PROVIDERS?id:"openai") as ProviderId;}
+async function configuration(){const provider=await promptProvider();return {runninghub:!!await setting("runninghub_key"),provider,keys:{openai:!!await setting("openai_key"),xai:!!await setting("xai_key")},prompts:!!await setting(PROMPT_PROVIDERS[provider].key),template:!!await setting("workflow_template"),workflowId:WORKFLOW_ID,baseCost:Number(await setting("base_cost","10")),promptCost:Number(await setting("prompt_cost","1")),globalLimit:Number(await setting("global_limit","2")),model:await setting(`prompt_model:${provider}`,await setting(provider==="openai"?"prompt_model":"",PROMPT_PROVIDERS[provider].model))};}
 async function ownMedia(a:Account,id:string){const row=await db().prepare("SELECT * FROM media WHERE id=? AND owner=?").bind(id,a.id).first<any>();if(!row)throw new AppError(404,"Arquivo não encontrado no seu acervo.");return row;}
 async function object(a:Account,id:string){const row=await ownMedia(a,id);const obj=await bucket().get(row.object_key);if(!obj)throw new AppError(404,"Arquivo indisponível.");return {row,obj};}
 async function reserve(a:Account,b:any,kind:string,cost:number,title:string){
@@ -85,15 +89,16 @@ async function systemPrompt(views:string[],head:boolean){
  if(views.length)instructions+="\n\n"+await agentPrompt("SWAP_VISTAS");if(head)instructions+="\n\n"+await agentPrompt("SWAP_CABECA");return instructions;
 }
 // Streams one reserved prompt job to the browser: progress events, then the final result.
-function streamPromptJob(job:any,model:string,instructions:string,note:string,images:PromptImage[],parse:(text:string)=>any){
+function streamPromptJob(job:any,c:{provider:ProviderId;model:string},instructions:string,note:string,images:PromptImage[],parse:(text:string)=>any){
+ const provider=PROMPT_PROVIDERS[c.provider],model=c.model;
  const stream=eventStream(async(send,signal)=>{
   let sent=false;
   // A live attempt refreshes its timestamp; one killed with the connection goes stale and is recovered.
   const alive=setInterval(()=>{db().prepare("UPDATE jobs SET updated=? WHERE id=? AND state='submitting'").bind(now(),job.id).run().catch(()=>{});},PROMPT_HEARTBEAT_MS);
   const fail=async(state:string,error:string,refund=false)=>{await update(job.id,state,{error,refund});return {id:job.id,state,error};};
   try{
-   const key=await secret("openai_key");await update(job.id,"submitting");sent=true;
-   const res=await fetch("https://api.openai.com/v1/responses",{method:"POST",headers:{Authorization:`Bearer ${key}`,"Content-Type":"application/json"},body:promptBody(model,instructions,note,images),signal:AbortSignal.any([signal,AbortSignal.timeout(PROMPT_TIMEOUT_MS)])});
+   const key=await secret(provider.key);await update(job.id,"submitting");sent=true;
+   const res=await fetch(provider.url,{method:"POST",headers:{Authorization:`Bearer ${key}`,"Content-Type":"application/json"},body:promptBody(model,instructions,note,images),signal:AbortSignal.any([signal,AbortSignal.timeout(PROMPT_TIMEOUT_MS)])});
    if(!res.ok||!res.body){let detail="";try{detail=String((await res.json() as any)?.error?.message||"").slice(0,300);}catch{}return fail("rejected",`Gerador respondeu HTTP ${res.status}${detail?`: ${detail}`:"."}`,true);}
    send({type:"progress",phase:"thinking"});
    const r=await readPromptStream(res.body,chars=>send({type:"progress",phase:"writing",chars}));
@@ -115,7 +120,7 @@ async function generate(a:Account,b:any){
  const instructions=await systemPrompt(views,b.options?.head!==false);
  const note=`${views.length?`Extra views sent: ${views.join(", ")}.\n`:""}Operator request: ${String(b.note||"").slice(0,4000)}\nWrite the required <prompt> and <notas> blocks. Describe only the supplied images.`;
  const {job,fresh}=await reserve(a,b,"prompt",c.promptCost,"Prompt · Body swap");if(!fresh)return {id:job.id,state:job.state,result:job.result?JSON.parse(job.result):null,error:job.error||undefined};
- return streamPromptJob(job,c.model,instructions,note,images,parsePrompt);
+ return streamPromptJob(job,c,instructions,note,images,parsePrompt);
 }
 // Revises the prompt of a finished creation: the model sees the references, the generated image and the operator's request.
 async function refine(a:Account,b:any){
@@ -140,7 +145,7 @@ async function refine(a:Account,b:any){
  const note=refineNote({prompt,headPrompt:String(b.headPrompt||"").slice(0,20000),instructions:request,views,options});
  const {job,fresh}=await reserve(a,{...b,options},"prompt",c.promptCost,"Prompt · Refino");
  if(!fresh){drop();return {id:job.id,state:job.state,result:job.result?JSON.parse(job.result):null,error:job.error||undefined};}
- return streamPromptJob(job,c.model,instructions,note,images,text=>{const r=parsePrompt(text);return r&&{...r,ajustes:parseAdjustments(text)};});
+ return streamPromptJob(job,c,instructions,note,images,text=>{const r=parsePrompt(text);return r&&{...r,ajustes:parseAdjustments(text)};});
 }
 // The settings a finished job used, so the user can review, refine or repeat it.
 async function jobDetails(a:Account,id:string){
@@ -199,9 +204,11 @@ export async function route(req:Request,path:string[]){
    await db().prepare("INSERT INTO accounts(id,email,name,role,active,budget,concurrent,created) VALUES(?,?,?,'member',?,?,?,?) ON CONFLICT(email) DO UPDATE SET name=excluded.name,active=excluded.active,budget=excluded.budget,concurrent=excluded.concurrent").bind(uuid(),email,String(b.name||email).slice(0,100),b.active===false?0:1,integer(b.budget,0,1000000),integer(b.concurrent,1,10),now()).run();await audit(a.id,"account_updated",email);return {ok:true};
   }
   if(key==="admin/config"&&req.method==="POST"){
-   const b=await json(req);for(const [field,name]of [["runninghubKey","runninghub_key"],["openaiKey","openai_key"]])if(b[field]){const value=String(b[field]).trim();if(value.length<16||value.length>1000)throw new AppError(400,"Chave inválida.");await putSetting(name,await encrypt(value));}
+   const b=await json(req);for(const [field,name]of [["runninghubKey","runninghub_key"],["openaiKey","openai_key"],["xaiKey","xai_key"]])if(b[field]){const value=String(b[field]).trim();if(value.length<16||value.length>1000)throw new AppError(400,"Chave inválida.");await putSetting(name,await encrypt(value));}
    if(b.template)await putSetting("workflow_template",JSON.stringify(validateGraph(b.template)));
-   if(b.model){if(!/^[a-zA-Z0-9._-]{1,100}$/.test(b.model))throw new AppError(400,"Modelo inválido.");await putSetting("prompt_model",b.model);}
+   if(b.provider!=null){if(!(b.provider in PROMPT_PROVIDERS))throw new AppError(400,"Provedor inválido.");await putSetting("prompt_provider",b.provider);}
+   // Each provider remembers its own model name.
+   if(b.model){if(!/^[a-zA-Z0-9._-]{1,100}$/.test(b.model))throw new AppError(400,"Modelo inválido.");await putSetting(`prompt_model:${await promptProvider()}`,b.model);}
    for(const [field,name,min,max]of [["baseCost","base_cost",1,10000],["promptCost","prompt_cost",1,1000],["globalLimit","global_limit",1,20]] as const)if(b[field]!=null)await putSetting(name,String(integer(b[field],min,max)));
    await audit(a.id,"integration_updated","configuration");return {ok:true,config:await configuration()};
   }
