@@ -31,3 +31,15 @@ test("HTML crash responses produce a useful error without leaking server markup"
  await assert.rejects(()=>readApiResponse(Response.json({error:"Entre para acessar."},{status:401})),(e:any)=>e.status===401);
  assert.deepEqual(await readApiResponse(Response.json({result:{prompt:"ok"}})),{result:{prompt:"ok"}});
 });
+
+test("chat completions body carries the system prompt, labels and images for gateways",async()=>{
+ const input=Uint8Array.from({length:3001},(_,i)=>i%251);
+ const body=promptBody("grok-4.7",'Sistema "ação"',"Pedido",[{label:"Cena",mime:"image/jpeg",open:async()=>new ReadableStream({start(c){c.enqueue(input);c.close();}})}],"chat");
+ const data=JSON.parse(await new Response(body).text());
+ assert.equal(data.model,"grok-4.7");assert.equal(data.stream,true);assert.equal(data.input,undefined);
+ assert.deepEqual(data.messages[0],{role:"system",content:'Sistema "ação"'});
+ const parts=data.messages[1].content;
+ assert.deepEqual(parts[0],{type:"text",text:"Cena"});assert.equal(parts[2].text,"Pedido");
+ assert.equal(parts[1].type,"image_url");assert.ok(parts[1].image_url.url.startsWith("data:image/jpeg;base64,"));
+ assert.deepEqual(Buffer.from(parts[1].image_url.url.split(",")[1],"base64"),Buffer.from(input));
+});

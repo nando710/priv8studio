@@ -3,8 +3,8 @@ import { currentUser, mayBootstrap, adminEmails, authMode } from "./auth";
 import { AppError, ACTIVE, month, integer, cleanOptions, price, parseOutput, taskId, RESERVE_SQL, WORKFLOW_ID, RECOVER_PROMPTS_SQL, PROMPT_RECOVERY_MS, PROMPT_TIMEOUT_MS, PROMPT_HEARTBEAT_MS } from "./core";
 import { buildGraph, validateGraph } from "./workflow";
 import { AGENTS, MAX_AGENT_PROMPT, agentSettingKey, defaultAgentPrompt, findAgent, type AgentId } from "./agents";
-import { promptBody, PROMPT_IMAGE_BYTES, type PromptImage } from "./prompt-body";
-import { eventStream, parsePrompt, readPromptStream } from "./prompt-stream";
+import { promptBody, PROMPT_IMAGE_BYTES, type PromptImage, type PromptFormat } from "./prompt-body";
+import { eventStream, parsePrompt, readPromptStream, readChatStream } from "./prompt-stream";
 import { parseAdjustments, refineNote } from "./refine";
 type Account={id:string;user_id:string;email:string;name:string;role:string;active:number;budget:number;concurrent:number};
 const db=()=>{if(!env.DB)throw new AppError(503,"Banco de dados indisponível.");return env.DB;};
@@ -40,10 +40,21 @@ async function rh(path:string,payload:any,form?:FormData){
  if(!res.ok)throw new AppError(502,`RunningHub respondeu HTTP ${res.status}.`);try{return await res.json() as any;}catch{throw new AppError(502,"Resposta inválida do RunningHub.");}
 }
 // Prompt writers speak the OpenAI Responses API; xAI (Grok) serves the same API at its own base URL.
-const PROMPT_PROVIDERS={openai:{key:"openai_key",url:"https://api.openai.com/v1/responses",model:"gpt-6.1-sol"},xai:{key:"xai_key",url:"https://api.x.ai/v1/responses",model:"grok-4.7"}} as const;
+const PROMPT_PROVIDERS={openai:{key:"openai_key",url:"https://api.openai.com/v1/responses",model:"gpt-6.1-sol"},xai:{key:"xai_key",url:"https://api.x.ai/v1/responses",model:"grok-4.7"},custom:{key:"custom_key",url:"",model:"grok-4.7"}} as const;
 type ProviderId=keyof typeof PROMPT_PROVIDERS;
 async function promptProvider(){const id=await setting("prompt_provider","openai");return (id in PROMPT_PROVIDERS?id:"openai") as ProviderId;}
-async function configuration(){const provider=await promptProvider();return {runninghub:!!await setting("runninghub_key"),provider,keys:{openai:!!await setting("openai_key"),xai:!!await setting("xai_key")},prompts:!!await setting(PROMPT_PROVIDERS[provider].key),template:!!await setting("workflow_template"),workflowId:WORKFLOW_ID,baseCost:Number(await setting("base_cost","10")),promptCost:Number(await setting("prompt_cost","1")),globalLimit:Number(await setting("global_limit","2")),model:await setting(`prompt_model:${provider}`,await setting(provider==="openai"?"prompt_model":"",PROMPT_PROVIDERS[provider].model))};}
+// "custom" is any OpenAI-compatible gateway: the admin gives its base URL and the API format it speaks.
+async function promptEndpoint(provider:ProviderId):Promise<{url:string;format:PromptFormat}>{
+ if(provider!=="custom")return {url:PROMPT_PROVIDERS[provider].url,format:"responses"};
+ const base=await setting("custom_base_url"),format=await setting("custom_format","responses")==="chat"?"chat":"responses";
+ return {url:base&&`${base}/${format==="chat"?"chat/completions":"responses"}`,format};
+}
+function cleanBaseUrl(value:string){
+ let url:URL;try{url=new URL(value.trim());}catch{throw new AppError(400,"Base URL inválida.");}
+ if(url.protocol!=="https:"||url.username||url.password||url.search||url.hash||value.length>300)throw new AppError(400,"A Base URL precisa começar com https:// e não pode ter usuário, senha ou parâmetros.");
+ return (url.origin+url.pathname).replace(/\/+$/,"").replace(/\/(responses|chat\/completions)$/,"");
+}
+async function configuration(){const provider=await promptProvider(),endpoint=await promptEndpoint(provider);return {runninghub:!!await setting("runninghub_key"),provider,keys:{openai:!!await setting("openai_key"),xai:!!await setting("xai_key"),custom:!!await setting("custom_key")},baseUrl:await setting("custom_base_url"),format:await setting("custom_format","responses"),prompts:!!await setting(PROMPT_PROVIDERS[provider].key)&&!!endpoint.url,template:!!await setting("workflow_template"),workflowId:WORKFLOW_ID,baseCost:Number(await setting("base_cost","10")),promptCost:Number(await setting("prompt_cost","1")),globalLimit:Number(await setting("global_limit","2")),model:await setting(`prompt_model:${provider}`,await setting(provider==="openai"?"prompt_model":"",PROMPT_PROVIDERS[provider].model))};}
 async function ownMedia(a:Account,id:string){const row=await db().prepare("SELECT * FROM media WHERE id=? AND owner=?").bind(id,a.id).first<any>();if(!row)throw new AppError(404,"Arquivo não encontrado no seu acervo.");return row;}
 async function object(a:Account,id:string){const row=await ownMedia(a,id);const obj=await bucket().get(row.object_key);if(!obj)throw new AppError(404,"Arquivo indisponível.");return {row,obj};}
 async function reserve(a:Account,b:any,kind:string,cost:number,title:string){
@@ -97,11 +108,11 @@ function streamPromptJob(job:any,c:{provider:ProviderId;model:string},instructio
   const alive=setInterval(()=>{db().prepare("UPDATE jobs SET updated=? WHERE id=? AND state='submitting'").bind(now(),job.id).run().catch(()=>{});},PROMPT_HEARTBEAT_MS);
   const fail=async(state:string,error:string,refund=false)=>{await update(job.id,state,{error,refund});return {id:job.id,state,error};};
   try{
-   const key=await secret(provider.key);await update(job.id,"submitting");sent=true;
-   const res=await fetch(provider.url,{method:"POST",headers:{Authorization:`Bearer ${key}`,"Content-Type":"application/json"},body:promptBody(model,instructions,note,images),signal:AbortSignal.any([signal,AbortSignal.timeout(PROMPT_TIMEOUT_MS)])});
-   if(!res.ok||!res.body){let detail="";try{detail=String((await res.json() as any)?.error?.message||"").slice(0,300);}catch{}return fail("rejected",`Gerador respondeu HTTP ${res.status}${detail?`: ${detail}`:"."}`,true);}
+   const key=await secret(provider.key),endpoint=await promptEndpoint(c.provider);await update(job.id,"submitting");sent=true;
+   const res=await fetch(endpoint.url,{method:"POST",headers:{Authorization:`Bearer ${key}`,"Content-Type":"application/json"},body:promptBody(model,instructions,note,images,endpoint.format),signal:AbortSignal.any([signal,AbortSignal.timeout(PROMPT_TIMEOUT_MS)])});
+   if(!res.ok||!res.body){let detail="";try{const body=await res.json() as any;detail=String(body?.error?.message||body?.message||(typeof body?.error==="string"?body.error:"")).slice(0,300);}catch{}return fail("rejected",`Gerador respondeu HTTP ${res.status}${detail?`: ${detail}`:"."}`,true);}
    send({type:"progress",phase:"thinking"});
-   const r=await readPromptStream(res.body,chars=>send({type:"progress",phase:"writing",chars}));
+   const r=await (endpoint.format==="chat"?readChatStream:readPromptStream)(res.body,chars=>send({type:"progress",phase:"writing",chars}));
    // Known outcomes are final: they must not keep holding a concurrency slot like "unknown" does.
    if(r.status==="incomplete")return fail("failed",r.reason==="max_output_tokens"?"O gerador atingiu o limite de tamanho da resposta antes de terminar o prompt. Tente de novo ou use um modelo mais rápido em Configurações.":`O gerador parou antes de terminar (${r.reason||"motivo não informado"}).`);
    if(r.status==="failed")return fail("failed",`O gerador falhou: ${r.error.slice(0,300)||"erro não informado"}.`);
@@ -204,8 +215,10 @@ export async function route(req:Request,path:string[]){
    await db().prepare("INSERT INTO accounts(id,email,name,role,active,budget,concurrent,created) VALUES(?,?,?,'member',?,?,?,?) ON CONFLICT(email) DO UPDATE SET name=excluded.name,active=excluded.active,budget=excluded.budget,concurrent=excluded.concurrent").bind(uuid(),email,String(b.name||email).slice(0,100),b.active===false?0:1,integer(b.budget,0,1000000),integer(b.concurrent,1,10),now()).run();await audit(a.id,"account_updated",email);return {ok:true};
   }
   if(key==="admin/config"&&req.method==="POST"){
-   const b=await json(req);for(const [field,name]of [["runninghubKey","runninghub_key"],["openaiKey","openai_key"],["xaiKey","xai_key"]])if(b[field]){const value=String(b[field]).trim();if(value.length<16||value.length>1000)throw new AppError(400,"Chave inválida.");await putSetting(name,await encrypt(value));}
+   const b=await json(req);for(const [field,name]of [["runninghubKey","runninghub_key"],["openaiKey","openai_key"],["xaiKey","xai_key"],["customKey","custom_key"]])if(b[field]){const value=String(b[field]).trim();if(value.length<16||value.length>1000)throw new AppError(400,"Chave inválida.");await putSetting(name,await encrypt(value));}
    if(b.template)await putSetting("workflow_template",JSON.stringify(validateGraph(b.template)));
+   if(b.baseUrl)await putSetting("custom_base_url",cleanBaseUrl(String(b.baseUrl)));
+   if(b.format!=null){if(b.format!=="responses"&&b.format!=="chat")throw new AppError(400,"Formato inválido.");await putSetting("custom_format",b.format);}
    if(b.provider!=null){if(!(b.provider in PROMPT_PROVIDERS))throw new AppError(400,"Provedor inválido.");await putSetting("prompt_provider",b.provider);}
    // Each provider remembers its own model name.
    if(b.model){if(!/^[a-zA-Z0-9._-]{1,100}$/.test(b.model))throw new AppError(400,"Modelo inválido.");await putSetting(`prompt_model:${await promptProvider()}`,b.model);}

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readPromptStream, parsePrompt, eventStream } from "../lib/prompt-stream";
+import { readPromptStream, readChatStream, parsePrompt, eventStream } from "../lib/prompt-stream";
 import { readApiStream } from "../lib/http-response";
 
 const sse=(events:any[],newline="\n")=>events.map(e=>`event: ${e.type}${newline}data: ${JSON.stringify(e)}${newline}${newline}`).join("");
@@ -46,4 +46,17 @@ test("cancelling the browser stream aborts the work, and a dropped stream is an 
  const cut=new ReadableStream({start(c){c.enqueue(new TextEncoder().encode('{"type":"wait"}\n'));c.close();}});
  await assert.rejects(()=>readApiStream(new Response(cut,{headers:{"Content-Type":"application/x-ndjson"}}),()=>{}),/conexão caiu/);
  await assert.rejects(()=>readApiStream(Response.json({error:"Selecione a cena e a modelo."},{status:400}),()=>{}),/Selecione a cena/);
+});
+
+const chat=(events:any[])=>events.map(e=>`data: ${JSON.stringify(e)}\n\n`).join("")+"data: [DONE]\n\n";
+const delta=(content:string,finish:string|null=null)=>({choices:[{index:0,delta:{content},finish_reason:finish}]});
+test("reads chat completions streams from gateways",async()=>{
+ const seen:number[]=[];
+ const r=await readChatStream(chunked(chat([{choices:[{delta:{role:"assistant",reasoning_content:"pensando"}}]},delta(answer.slice(0,30)),delta(answer.slice(30)),delta("","stop")])),n=>seen.push(n));
+ assert.equal(r.status,"completed");assert.equal(r.text,answer);assert.deepEqual(seen,[30,answer.length]);
+ const cut=await readChatStream(chunked(chat([delta("<prompt>body"),delta("","length")])));
+ assert.equal(cut.status,"incomplete");assert.equal(cut.reason,"max_output_tokens");
+ const failed=await readChatStream(chunked(chat([{error:{message:"quota exceeded"}}])));
+ assert.equal(failed.status,"failed");assert.equal(failed.error,"quota exceeded");
+ assert.equal((await readChatStream(chunked(""))).status,"unknown");
 });

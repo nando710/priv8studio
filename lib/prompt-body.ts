@@ -24,22 +24,39 @@ async function* imageBase64(stream: ReadableStream<Uint8Array>) {
  } finally { if (!complete) await reader.cancel().catch(() => {}); reader.releaseLock(); }
 }
 
-export function promptBody(model: string, instructions: string, note: string, images: PromptImage[]) {
+export type PromptFormat = "responses" | "chat";
+// The Responses API (OpenAI, xAI) or Chat Completions, which almost every OpenAI-compatible gateway accepts.
+const FORMATS = {
+ responses: {
+  open: (model: string, instructions: string) => JSON.stringify({ model, instructions, store: false, stream: true, max_output_tokens: MAX_OUTPUT_TOKENS }).slice(0,-1) + ',"input":[{"role":"user","content":[',
+  text: (text: string) => JSON.stringify({type:"input_text",text}),
+  image: (mime: string) => '{"type":"input_image","detail":"high","image_url":"data:' + mime + ';base64,',
+  imageEnd: '"}',
+ },
+ chat: {
+  open: (model: string, instructions: string) => JSON.stringify({ model, stream: true, max_tokens: MAX_OUTPUT_TOKENS }).slice(0,-1) + ',"messages":[' + JSON.stringify({role:"system",content:instructions}) + ',{"role":"user","content":[',
+  text: (text: string) => JSON.stringify({type:"text",text}),
+  image: (mime: string) => '{"type":"image_url","image_url":{"detail":"high","url":"data:' + mime + ';base64,',
+  imageEnd: '"}}',
+ },
+};
+
+export function promptBody(model: string, instructions: string, note: string, images: PromptImage[], format: PromptFormat = "responses") {
+ const f = FORMATS[format];
  async function* chunks() {
   // Streaming keeps the connection active while the model reasons. Reasoning tokens count toward
   // max_output_tokens, so the budget must cover reasoning plus the long 13/14-paragraph prompt.
-  const settings = JSON.stringify({ model, instructions, store: false, stream: true, max_output_tokens: MAX_OUTPUT_TOKENS });
-  yield settings.slice(0,-1) + ',"input":[{"role":"user","content":[';
+  yield f.open(model, instructions);
   let first = true;
   for (const image of images) {
    if (!/^image\/(png|jpeg|webp)$/.test(image.mime)) throw new Error("Unsupported image type");
    if (!first) yield ','; first = false;
-   yield JSON.stringify({type:"input_text",text:image.label}) + ',{"type":"input_image","detail":"high","image_url":"data:' + image.mime + ';base64,';
+   yield f.text(image.label) + ',' + f.image(image.mime);
    yield* imageBase64(await image.open());
-   yield '"}';
+   yield f.imageEnd;
   }
   if (!first) yield ',';
-  yield JSON.stringify({type:"input_text",text:note}) + ']}]}';
+  yield f.text(note) + ']}]}';
  }
  const iterator = chunks();
  return new ReadableStream<Uint8Array>({
